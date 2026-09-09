@@ -48,5 +48,15 @@ if [[ -f "bin/pi-sm" ]]; then
   echo "   ✓ Bash syntax: Valid."
 fi
 
+# 4. OSV-Scanner for CVEs
+if command -v osv-scanner >/dev/null 2>&1; then
+  if [[ -f "package-lock.json" || -f "yarn.lock" || -f "pnpm-lock.yaml" || -f "requirements.txt" ]]; then
+    osv-scanner -r .
+    echo "   ✓ OSV-Scanner: No known CVEs found."
+  else
+    echo "   ✓ OSV-Scanner: Zero 3rd-party dependencies (no lockfile needed)."
+  fi
+fi
+
 echo "✅ All pre-push security checks passed!"
 exit 0
