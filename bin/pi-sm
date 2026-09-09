@@ -1,0 +1,1129 @@
+#!/usr/bin/env bash
+# pi-sm: Zero-bloat CLI for Pi session & config management across machines (macOS / Linux).
+# Works seamlessly with OneDrive, local mounts, or any synced folder.
+set -euo pipefail
+
+expand_path() {
+  local p="$1"
+  if [[ "$p" == ~* ]]; then
+    p="${p/#\~/$HOME}"
+  fi
+  printf '%s' "$p"
+}
+
+detect_storage_dir() {
+  if [[ -n "${PI_STORAGE_DIR:-}" ]]; then
+    expand_path "$PI_STORAGE_DIR"
+    return
+  fi
+
+  if [[ -d "$HOME/OneDrive" ]]; then
+    printf '%s/OneDrive/PiSync' "$HOME"
+    return
+  fi
+
+  if [[ -d "$HOME/Library/CloudStorage" ]]; then
+    local od
+    od=$(find "$HOME/Library/CloudStorage" -maxdepth 1 -name 'OneDrive*' -print -quit 2>/dev/null || true)
+    if [[ -n "$od" && -d "$od" ]]; then
+      printf '%s/PiSync' "$od"
+      return
+    fi
+  fi
+
+  printf '%s/.pi-sync' "$HOME"
+}
+
+BASE_STORAGE="$(detect_storage_dir)"
+SAVE_DIR="${PI_SAVE_SESSION:-$BASE_STORAGE/sessions}"
+SAVE_DIR="$(expand_path "$SAVE_DIR")"
+
+LOAD_DIR="${PI_LOAD_SESSION:-${PI_SAVE_SESSION:-$BASE_STORAGE/sessions}}"
+LOAD_DIR="$(expand_path "$LOAD_DIR")"
+
+CONFIG_DIR="${PI_STORAGE_DIR:-$BASE_STORAGE}/config"
+CONFIG_DIR="$(expand_path "$CONFIG_DIR")"
+AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+AGENT_DIR="$(expand_path "$AGENT_DIR")"
+
+sanitize() {
+  printf '%s' "$1" | tr ' /\\?%*:|<>"' '-'
+}
+
+find_git_root() {
+  local d="$1"
+  while [[ -n "$d" && "$d" != "/" && "$d" != "." ]]; do
+    if [[ -d "$d/.git" ]]; then
+      printf '%s' "$d"
+      return
+    fi
+    d="$(dirname "$d")"
+  done
+}
+
+git_sync_pull() {
+  local root
+  root="$(find_git_root "$1")"
+  if [[ -n "$root" ]]; then
+    git -C "$root" pull --quiet --rebase 2>/dev/null || true
+  fi
+}
+
+git_sync_push() {
+  local target_dir="$1"
+  local root
+  root="$(find_git_root "$target_dir")"
+  local msg="${2:-pi-sync: update}"
+  shift 2 || true
+  if [[ -n "$root" ]]; then
+    git -C "$root" pull --quiet --rebase 2>/dev/null || true
+    if [[ $# -gt 0 ]]; then
+      local rel_files=()
+      for f in "$@"; do
+        local rel="${f#"$root"/}"
+        rel_files+=("$rel")
+      done
+      if [[ ${#rel_files[@]} -gt 0 ]]; then
+        git -C "$root" add -- "${rel_files[@]}" 2>/dev/null || true
+      fi
+    else
+      git -C "$root" add -A 2>/dev/null || true
+    fi
+    git -C "$root" commit -m "$msg" --quiet 2>/dev/null || true
+    git -C "$root" push --quiet 2>/dev/null || true
+  fi
+}
+
+current_project_session_dir() {
+  local cwd
+  cwd="$(pwd -P)"
+  cwd="${cwd%/}"
+  local clean="${cwd#/}"
+  local sanitized="--${clean//\//-}--"
+  printf '%s/sessions/%s' "$AGENT_DIR" "$sanitized"
+}
+
+render_preview() {
+  local target="${1:-}"
+  if [[ -z "$target" || ! -f "$target" ]]; then
+    echo "No session selected or file not found."
+    return
+  fi
+
+  python3 -c '
+import sys, json, os
+
+session_file = sys.argv[1]
+
+CYAN = "\033[1;36m"
+BLUE = "\033[1;34m"
+GREEN = "\033[1;32m"
+YELLOW = "\033[1;33m"
+DIM = "\033[2m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+lines = []
+has_omitted_split = False
+try:
+    with open(session_file, "r", encoding="utf-8") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(0)
+        if size <= 128 * 1024:
+            lines = f.readlines()
+        else:
+            has_omitted_split = True
+            head_chunk = f.read(64 * 1024).splitlines(keepends=True)
+            f.seek(size - 64 * 1024)
+            tail_chunk = f.read(64 * 1024).splitlines(keepends=True)[1:]
+            lines = head_chunk + ["__OMITTED__\n"] + tail_chunk
+except Exception as e:
+    print(f"Error reading session: {e}")
+    sys.exit(0)
+
+if not lines:
+    print("Empty session file.")
+    sys.exit(0)
+
+try:
+    header = json.loads(lines[0].strip())
+except Exception:
+    header = {}
+
+name = ""
+head_messages = []
+tail_messages = []
+curr_list = head_messages
+
+for line in lines[1:]:
+    line_s = line.strip()
+    if line_s == "__OMITTED__":
+        curr_list = tail_messages
+        continue
+    if not line_s: continue
+    try:
+        entry = json.loads(line_s)
+        if entry.get("type") == "session_info" and entry.get("name"):
+            name = entry["name"]
+        elif entry.get("type") == "message":
+            msg = entry.get("message", {})
+            role = msg.get("role")
+            content = msg.get("content", "")
+            text = ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                parts = []
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "text":
+                        parts.append(b.get("text", ""))
+                text = " ".join(parts)
+            if role in ("user", "assistant") and text.strip():
+                curr_list.append((role, text.strip()))
+    except Exception:
+        pass
+
+disp_name = name if name else os.path.basename(session_file)
+cwd = header.get("cwd", "")
+proj = os.path.basename(cwd) if cwd else "unknown"
+
+all_messages = head_messages + tail_messages
+total_count = len(all_messages)
+
+print(f"{CYAN}{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+print(f"{BOLD}📁 Project:{RESET}  {proj} {DIM}({cwd}){RESET}")
+print(f"{BOLD}🏷️  Session:{RESET}  {YELLOW}{disp_name}{RESET}")
+print(f"{BOLD}💬 Turns:{RESET}    {total_count}+ dialog messages")
+print(f"{CYAN}{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}\n")
+
+def print_msg(idx, r, t):
+    role_header = f"{BLUE}{BOLD}👤 User [{idx}]:{RESET}" if r == "user" else f"{GREEN}{BOLD}🤖 Assistant [{idx}]:{RESET}"
+    lines_t = t.split("\n")
+    short = "\n".join(lines_t[:6])
+    if len(lines_t) > 6 or len(t) > 400:
+        short = short[:400] + f" {DIM}...[truncated]{RESET}"
+    print(f"{role_header}\n  {short}\n")
+
+if has_omitted_split or len(all_messages) > 6:
+    print(f"{GREEN}{BOLD}🟢 INIZIO CONVERSAZIONE:{RESET}")
+    for i, (r, t) in enumerate(head_messages[:2], 1):
+        print_msg(i, r, t)
+
+    print(f"{DIM}  ⋯ ⋯ ⋯ [messaggi intermedi omessi per brevità] ⋯ ⋯ ⋯{RESET}\n")
+
+    print(f"{YELLOW}{BOLD}🔴 ULTIMI MESSAGGI (stato recente):{RESET}")
+    tail_subset = tail_messages[-2:] if tail_messages else head_messages[-2:]
+    start_tail_idx = max(1, total_count - len(tail_subset) + 1)
+    for i, (r, t) in enumerate(tail_subset, start_tail_idx):
+        print_msg(i, r, t)
+else:
+    for i, (r, t) in enumerate(all_messages, 1):
+        print_msg(i, r, t)
+' "$target"
+}
+
+format_local_session_list() {
+  local dir="$1"
+  python3 -c '
+import os, sys, json, time
+
+dir_path = sys.argv[1]
+if not os.path.isdir(dir_path):
+    sys.exit(0)
+
+files = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.endswith(".jsonl")]
+files = sorted(files, key=lambda p: os.path.getmtime(p), reverse=True)[:45]
+
+BOLD = "\033[1m"
+DIM = "\033[2m"
+YELLOW = "\033[1;33m"
+RESET = "\033[0m"
+
+for fp in files:
+    mtime_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(fp)))
+    name = ""
+    first_prompt = ""
+    msg_count = 0
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            for _ in range(60):
+                line = f.readline()
+                if not line: break
+                try:
+                    e = json.loads(line.strip())
+                    if e.get("type") == "session_info" and e.get("name"):
+                        name = e["name"]
+                    elif e.get("type") == "message":
+                        msg_count += 1
+                        msg = e.get("message", {})
+                        if msg.get("role") == "user" and not first_prompt:
+                            content = msg.get("content", "")
+                            if isinstance(content, str): first_prompt = content
+                            elif isinstance(content, list):
+                                first_prompt = " ".join([b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"])
+                except Exception: pass
+    except Exception: pass
+    
+    title = name if name else (first_prompt[:50] if first_prompt else os.path.basename(fp)[:22])
+    title = title.replace("\n", " ").strip()
+    tag_badge = f" {YELLOW}[{name}]{RESET}" if name else ""
+    line = f"{DIM}{mtime_str}{RESET} │ {BOLD}{title}{RESET}{tag_badge} {DIM}({msg_count} msgs){RESET}\t{fp}"
+    print(line)
+' "$dir"
+}
+
+format_cloud_session_list() {
+  local dir="$1"
+  python3 -c '
+import os, sys, json, time
+
+dir_path = sys.argv[1]
+if not os.path.isdir(dir_path):
+    sys.exit(0)
+
+files = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.endswith(".jsonl")]
+files = sorted(files, key=lambda p: os.path.getmtime(p), reverse=True)
+
+BOLD = "\033[1m"
+DIM = "\033[2m"
+CYAN = "\033[1;36m"
+YELLOW = "\033[1;33m"
+RESET = "\033[0m"
+
+for fp in files:
+    mtime_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(fp)))
+    meta_path = os.path.splitext(fp)[0] + ".meta.json"
+    proj = ""
+    tag = ""
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as mf:
+                m = json.load(mf)
+                proj = m.get("projectName", "")
+                tag = m.get("name") or m.get("tag", "")
+        except Exception: pass
+    
+    if not proj or not tag:
+        base = os.path.splitext(os.path.basename(fp))[0]
+        if "--" in base:
+            parts = base.split("--")
+            if not proj: proj = parts[0]
+            if not tag: tag = parts[1]
+
+    first_prompt = ""
+    msg_count = 0
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            for _ in range(60):
+                line = f.readline()
+                if not line: break
+                try:
+                    e = json.loads(line.strip())
+                    if e.get("type") == "message":
+                        msg_count += 1
+                        msg = e.get("message", {})
+                        if msg.get("role") == "user" and not first_prompt:
+                            content = msg.get("content", "")
+                            if isinstance(content, str): first_prompt = content
+                            elif isinstance(content, list):
+                                first_prompt = " ".join([b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"])
+                except Exception: pass
+    except Exception: pass
+            
+    proj_badge = f"{CYAN}[{proj[:10]}]{RESET} " if proj else ""
+    title = tag[:18] if tag else (first_prompt[:35] if first_prompt else os.path.basename(fp)[:20])
+    title = title.replace("\n", " ").strip()
+    line = f"{DIM}{mtime_str}{RESET} │ {proj_badge}{BOLD}{title}{RESET} {DIM}({msg_count} msgs){RESET}\t{fp}"
+    print(line)
+' "$dir"
+}
+
+print_table_sessions() {
+  local dir="$1"
+  python3 -c '
+import os, sys, json, time
+
+dir_path = sys.argv[1]
+if not os.path.isdir(dir_path):
+    print("Storage directory does not exist: " + dir_path)
+    sys.exit(0)
+
+files = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.endswith(".jsonl")]
+files = sorted(files, key=lambda p: os.path.getmtime(p), reverse=True)
+
+BOLD = "\033[1m"
+CYAN = "\033[1;36m"
+GREEN = "\033[1;32m"
+YELLOW = "\033[1;33m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+print("\n" + BOLD + "📦 Cloud Sessions " + RESET + DIM + "(" + dir_path + ")" + RESET + "\n")
+
+header_fmt = "  {:<16}  {:<12}  {:<20}  {:<8}  {}"
+print(BOLD + header_fmt.format("DATE", "PROJECT", "TAG / NAME", "TURNS", "FIRST PROMPT") + RESET)
+print("  " + "─" * 95)
+
+total_bytes = 0
+for fp in files:
+    total_bytes += os.path.getsize(fp)
+    mtime_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(fp)))
+    meta_path = os.path.splitext(fp)[0] + ".meta.json"
+    proj = ""
+    tag = ""
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as mf:
+                m = json.load(mf)
+                proj = m.get("projectName", "")
+                tag = m.get("name") or m.get("tag", "")
+        except Exception: pass
+    
+    if not proj or not tag:
+        base = os.path.splitext(os.path.basename(fp))[0]
+        if "--" in base:
+            parts = base.split("--")
+            if not proj: proj = parts[0]
+            if not tag: tag = parts[1]
+
+    first_prompt = ""
+    msg_count = 0
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            for _ in range(60):
+                line = f.readline()
+                if not line: break
+                try:
+                    e = json.loads(line.strip())
+                    if e.get("type") == "message":
+                        msg_count += 1
+                        msg = e.get("message", {})
+                        if msg.get("role") == "user" and not first_prompt:
+                            content = msg.get("content", "")
+                            if isinstance(content, str): first_prompt = content
+                            elif isinstance(content, list):
+                                first_prompt = " ".join([b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"])
+                except Exception: pass
+    except Exception: pass
+
+    proj_disp = (proj[:10] + "..") if len(proj) > 12 else (proj if proj else "-")
+    tag_disp = (tag[:18] + "..") if len(tag) > 20 else (tag if tag else "-")
+    prompt_disp = first_prompt.replace("\n", " ").strip()
+    if len(prompt_disp) > 42:
+        prompt_disp = prompt_disp[:39] + "..."
+    if not prompt_disp:
+        prompt_disp = "-"
+
+    line_out = "  " + DIM + f"{mtime_str:<16}" + RESET + "  " + CYAN + f"{proj_disp:<12}" + RESET + "  " + YELLOW + f"{tag_disp:<20}" + RESET + "  " + GREEN + f"{str(msg_count):<8}" + RESET + "  " + prompt_disp
+    print(line_out)
+
+print("  " + "─" * 95)
+size_mb = total_bytes / (1024 * 1024)
+print("  " + DIM + f"Total: {len(files)} session(s) · {size_mb:.2f} MB" + RESET + "\n")
+' "$dir"
+}
+
+resume_session_from_path() {
+  local selected="$1"
+  local out_file="${2:-}"
+  local proj_dir
+  proj_dir="$(current_project_session_dir)"
+  mkdir -p "$proj_dir"
+
+  local resolved_dest
+  resolved_dest=$(python3 -c "
+import sys, json, os, datetime
+
+source = sys.argv[1]
+proj_dir = sys.argv[2]
+target_cwd = sys.argv[3]
+
+with open(source, 'r', encoding='utf-8') as fin:
+    raw_content = fin.read().replace('\r\n', '\n')
+
+lines = raw_content.split('\n')
+if not lines or not lines[0].strip():
+    sys.exit('File di sessione vuoto o non valido')
+
+try:
+    header = json.loads(lines[0])
+except Exception as e:
+    sys.exit(f'Header non valido: {e}')
+
+old_cwd = header.get('cwd', '')
+header['cwd'] = target_cwd
+
+rest = '\n'.join(lines[1:])
+if old_cwd and old_cwd != target_cwd:
+    rest = rest.replace(old_cwd, target_cwd)
+
+new_content = json.dumps(header) + '\n' + rest
+
+target_id = header.get('id', '')
+dest_name = os.path.basename(source)
+
+# 1. Match existing local file by session id
+matched = False
+if target_id and os.path.isdir(proj_dir):
+    for f in os.listdir(proj_dir):
+        if not f.endswith('.jsonl'):
+            continue
+        fp = os.path.join(proj_dir, f)
+        try:
+            with open(fp, 'r', encoding='utf-8') as check_f:
+                l1 = check_f.readline()
+                if l1 and json.loads(l1.strip()).get('id') == target_id:
+                    dest_name = f
+                    matched = True
+                    break
+        except Exception:
+            pass
+
+# 2. Match companion metadata sourceFile if not already matched
+if not matched:
+    meta_path = os.path.splitext(source)[0] + '.meta.json'
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as mf:
+                mdata = json.load(mf)
+                if mdata.get('sourceFile'):
+                    dest_name = mdata['sourceFile']
+        except Exception:
+            pass
+
+dest_file = os.path.join(proj_dir, dest_name)
+if os.path.exists(dest_file):
+    try:
+        with open(dest_file, 'r', encoding='utf-8') as check_f:
+            l1 = check_f.readline()
+            existing_id = json.loads(l1.strip()).get('id') if l1 else None
+            if existing_id and target_id and existing_id != target_id:
+                ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')
+                dest_file = os.path.join(proj_dir, f'{ts}_{dest_name}')
+    except Exception:
+        pass
+
+with open(dest_file, 'w', encoding='utf-8') as fout:
+    fout.write(new_content)
+
+print(dest_file)
+" "$selected" "$proj_dir" "$PWD")
+
+  if [[ -n "$out_file" ]]; then
+    printf '%s' "$resolved_dest" > "$out_file"
+    return
+  fi
+
+  echo "🚀 Resumed session into current project ($PWD)!"
+  echo "   Session file: $resolved_dest"
+  exec pi --session "$resolved_dest"
+}
+
+cmd_session_push() {
+  local force=0
+  local tag=""
+  for a in "$@"; do
+    if [[ "$a" == "--force" || "$a" == "-f" ]]; then
+      force=1
+    elif [[ -z "$tag" ]]; then
+      tag="$a"
+    fi
+  done
+  local proj_dir
+  proj_dir="$(current_project_session_dir)"
+
+  if [[ ! -d "$proj_dir" ]]; then
+    echo "❌ No sessions directory found for current project: $PWD" >&2
+    exit 1
+  fi
+
+  local all_sessions=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && all_sessions+=("$line")
+  done < <(python3 -c "
+import os, sys
+d = sys.argv[1]
+if os.path.isdir(d):
+    fl = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.jsonl')]
+    fl.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    for p in fl: print(p)
+" "$proj_dir" 2>/dev/null || true)
+
+  if [[ ${#all_sessions[@]} -eq 0 ]]; then
+    echo "❌ No .jsonl session files found in $proj_dir" >&2
+    exit 1
+  fi
+
+  local chosen_file=""
+
+  if [[ -n "$tag" ]]; then
+    chosen_file="${all_sessions[0]}"
+  else
+    if command -v fzf >/dev/null 2>&1; then
+      local this_script
+      this_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+      chosen_file=$(
+        format_local_session_list "$proj_dir" | fzf \
+          --ansi \
+          --delimiter=$'\t' \
+          --with-nth=1 \
+          --prompt="Select local session to push > " \
+          --header="ENTER: Select | ESC: Cancel" \
+          --preview="\"$this_script\" __preview {2}" \
+          --preview-window="right:65%:wrap" | cut -f2
+      ) || true
+    else
+      echo "Select local session to save:"
+      local idx=1
+      for f in "${all_sessions[@]}"; do
+        echo "  [$idx] $(basename "$f")"
+        idx=$((idx + 1))
+        [[ $idx -gt 15 ]] && break
+      done
+      read -e -rp "Enter number [1]: " c || c="1"
+      c="${c:-1}"
+      if [[ "$c" =~ ^[0-9]+$ ]] && [[ "$c" -ge 1 ]] && [[ "$c" -le ${#all_sessions[@]} ]]; then
+        chosen_file="${all_sessions[$((c - 1))]}"
+      fi
+    fi
+  fi
+
+  if [[ -z "$chosen_file" || ! -f "$chosen_file" ]]; then
+    echo "Cancelled."
+    exit 0
+  fi
+
+  git_sync_pull "$SAVE_DIR"
+  mkdir -p "$SAVE_DIR"
+  local proj_name
+  proj_name="$(basename "$PWD")"
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+
+  if [[ -z "$tag" ]]; then
+    read -e -rp "Enter backup tag/name (or press Enter for timestamp): " input_tag || input_tag=""
+    tag="${input_tag:-$ts}"
+  fi
+
+  local clean_tag
+  clean_tag="$(sanitize "$tag")"
+  local target_name="${proj_name}--${clean_tag}.jsonl"
+  local target_path="${SAVE_DIR}/${target_name}"
+
+  if [[ -f "$target_path" && $force -eq 0 ]]; then
+    read -e -rp "⚠️  Session '${clean_tag}' already exists in cloud. Overwrite? [y/N]: " confirm || confirm="n"
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+      echo "Cancelled."
+      exit 0
+    fi
+  fi
+
+  cp "$chosen_file" "$target_path"
+
+  local meta_file="${SAVE_DIR}/${proj_name}--${clean_tag}.meta.json"
+  python3 -c "
+import sys, json, os, datetime
+proj_name, cwd, tag, src_file, out_file = sys.argv[1:6]
+meta = {
+    'projectName': proj_name,
+    'projectCwd': cwd,
+    'tag': tag,
+    'savedAt': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'sourceFile': os.path.basename(src_file),
+    'hostname': os.uname().nodename,
+    'os': os.uname().sysname
+}
+with open(out_file, 'w', encoding='utf-8') as f:
+    json.dump(meta, f, indent=2)
+" "$proj_name" "$PWD" "$clean_tag" "$chosen_file" "$meta_file"
+
+  echo "✅ Session saved to storage:"
+  echo "   📁 Destination: $target_path"
+  git_sync_push "$SAVE_DIR" "session: $target_name" "$target_path" "$meta_file"
+}
+
+cmd_session_pull() {
+  local out_file=""
+  local prev=""
+  for a in "$@"; do
+    if [[ "$prev" == "--out" ]]; then
+      out_file="$a"
+    fi
+    prev="$a"
+  done
+
+  git_sync_pull "$LOAD_DIR"
+  if [[ ! -d "$LOAD_DIR" ]]; then
+    echo "❌ Storage directory does not exist: $LOAD_DIR" >&2
+    exit 1
+  fi
+
+  local files=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && files+=("$line")
+  done < <(python3 -c "
+import os, sys
+d = sys.argv[1]
+if os.path.isdir(d):
+    fl = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.jsonl')]
+    fl.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    for p in fl: print(p)
+" "$LOAD_DIR" 2>/dev/null || true)
+
+  if [[ ${#files[@]} -eq 0 ]]; then
+    echo "ℹ️  No sessions found in $LOAD_DIR"
+    exit 0
+  fi
+
+  local selected=""
+  if command -v fzf >/dev/null 2>&1; then
+    local this_script
+    this_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    selected=$(
+      format_cloud_session_list "$LOAD_DIR" | fzf \
+        --ansi \
+        --delimiter=$'\t' \
+        --with-nth=1 \
+        --prompt="Select cloud session to resume > " \
+        --header="ENTER: Resume session | ESC: Cancel" \
+        --preview="\"$this_script\" __preview {2}" \
+        --preview-window="right:65%:wrap" | cut -f2
+    ) || true
+  else
+    echo "Select session to load:"
+    local i=1
+    for f in "${files[@]}"; do
+      echo "  [$i] $(basename "$f")"
+      i=$((i + 1))
+    done
+    read -e -rp "Enter number: " choice || choice=""
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#files[@]} ]]; then
+      selected="${files[$((choice - 1))]}"
+    fi
+  fi
+
+  if [[ -z "$selected" || ! -f "$selected" ]]; then
+    exit 0
+  fi
+
+  resume_session_from_path "$selected" "$out_file"
+}
+
+cmd_session_list() {
+  local out_file=""
+  local prev=""
+  local table_mode=0
+  for a in "$@"; do
+    if [[ "$prev" == "--out" ]]; then
+      out_file="$a"
+    fi
+    if [[ "$a" == "--table" || "$a" == "-t" ]]; then
+      table_mode=1
+    fi
+    prev="$a"
+  done
+
+  git_sync_pull "$LOAD_DIR"
+  if [[ ! -d "$LOAD_DIR" ]]; then
+    echo "ℹ️  Storage directory does not exist: $LOAD_DIR"
+    exit 0
+  fi
+
+  local count
+  count=$(find "$LOAD_DIR" -maxdepth 1 -name "*.jsonl" 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$count" -eq 0 ]]; then
+    echo "ℹ️  No sessions found in $LOAD_DIR"
+    exit 0
+  fi
+
+  if [[ $table_mode -eq 1 ]] || { [[ -z "$out_file" ]] && ! command -v fzf >/dev/null 2>&1; }; then
+    print_table_sessions "$LOAD_DIR"
+    return
+  fi
+
+  local this_script
+  this_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  local selected
+  selected=$(
+    format_cloud_session_list "$LOAD_DIR" | fzf \
+      --ansi \
+      --delimiter=$'\t' \
+      --with-nth=1 \
+      --prompt="Browse cloud sessions > " \
+      --header="ENTER: Resume selected session | ESC: Exit explorer" \
+      --preview="\"$this_script\" __preview {2}" \
+      --preview-window="right:65%:wrap" | cut -f2
+  ) || true
+
+  if [[ -n "$selected" && -f "$selected" ]]; then
+    echo ""
+    echo "Selected: $(basename "$selected")"
+    echo "  [r] Resume session into current project"
+    echo "  [d] Delete session from cloud"
+    echo "  [c] Cancel"
+    read -e -rp "Action [r]: " action || action="r"
+    action="${action:-r}"
+    case "$action" in
+      [Rr]*)
+        resume_session_from_path "$selected" "$out_file"
+        ;;
+      [Dd]*)
+        read -e -rp "Delete $(basename "$selected") from cloud? [y/N]: " confirm || confirm="n"
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+          local meta_file="${selected%.jsonl}.meta.json"
+          rm -f "$selected" "$meta_file"
+          git_sync_push "$LOAD_DIR" "session: delete $(basename "$selected")" "$selected" "$meta_file"
+          echo "🗑️  Deleted: $(basename "$selected")"
+        else
+          echo "Cancelled."
+        fi
+        ;;
+      *)
+        echo "Cancelled."
+        ;;
+    esac
+  fi
+}
+
+cmd_session_delete() {
+  git_sync_pull "$LOAD_DIR"
+  if [[ ! -d "$LOAD_DIR" ]]; then
+    echo "❌ Storage directory does not exist: $LOAD_DIR" >&2
+    exit 1
+  fi
+
+  local count
+  count=$(find "$LOAD_DIR" -maxdepth 1 -name "*.jsonl" 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$count" -eq 0 ]]; then
+    echo "ℹ️  No sessions found in $LOAD_DIR"
+    exit 0
+  fi
+
+  local selected=""
+  if command -v fzf >/dev/null 2>&1; then
+    local this_script
+    this_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    selected=$(
+      format_cloud_session_list "$LOAD_DIR" | fzf \
+        --ansi \
+        --delimiter=$'\t' \
+        --with-nth=1 \
+        --prompt="Select cloud session to delete > " \
+        --header="ENTER: Select for deletion | ESC: Cancel" \
+        --preview="\"$this_script\" __preview {2}" \
+        --preview-window="right:65%:wrap" | cut -f2
+    ) || true
+  else
+    local files=()
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && files+=("$line")
+    done < <(python3 -c "
+import os, sys
+d = sys.argv[1]
+if os.path.isdir(d):
+    fl = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.jsonl')]
+    fl.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    for p in fl: print(p)
+" "$LOAD_DIR" 2>/dev/null || true)
+    echo "Select session to delete:"
+    local i=1
+    for f in "${files[@]}"; do
+      echo "  [$i] $(basename "$f")"
+      i=$((i + 1))
+    done
+    read -e -rp "Enter number: " choice || choice=""
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#files[@]} ]]; then
+      selected="${files[$((choice - 1))]}"
+    fi
+  fi
+
+  if [[ -z "$selected" || ! -f "$selected" ]]; then
+    exit 0
+  fi
+
+  read -e -rp "Delete $(basename "$selected") from cloud? [y/N]: " confirm || confirm="n"
+  if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    local meta_file="${selected%.jsonl}.meta.json"
+    rm -f "$selected" "$meta_file"
+    git_sync_push "$LOAD_DIR" "session: delete $(basename "$selected")" "$selected" "$meta_file"
+    echo "🗑️  Deleted: $(basename "$selected")"
+  else
+    echo "Cancelled."
+  fi
+}
+
+cmd_config_push() {
+  git_sync_pull "$CONFIG_DIR"
+  mkdir -p "$CONFIG_DIR"
+  echo "📦 Backing up configuration to $CONFIG_DIR (Strategia 4: physical paths + symlinks)..."
+  echo "   🔒 Excluding auth.json (API keys) and npm/ (binaries)"
+
+  python3 -c "
+import os, sys, shutil, json
+
+agent_dir = sys.argv[1]
+config_dir = sys.argv[2]
+home = os.path.expanduser('~')
+
+os.makedirs(config_dir, exist_ok=True)
+ignore_patterns = shutil.ignore_patterns('.git', 'node_modules', '*.bak', '*.preimport.bak')
+
+# 1. settings.json
+s_src = os.path.join(agent_dir, 'settings.json')
+if os.path.isfile(s_src):
+    shutil.copy2(s_src, os.path.join(config_dir, 'settings.json'))
+    print('   ✓ settings.json')
+
+# 2. prompts/
+p_src = os.path.join(agent_dir, 'prompts')
+p_dst = os.path.join(config_dir, 'prompts')
+if os.path.isdir(p_src):
+    if os.path.exists(p_dst):
+        shutil.rmtree(p_dst)
+    shutil.copytree(p_src, p_dst, ignore=ignore_patterns)
+    print('   ✓ prompts/')
+
+# 3. skills & extensions with physical target preservation
+manifest = []
+folders = ['skills', 'extensions']
+for folder in folders:
+    f_src = os.path.join(agent_dir, folder)
+    if not os.path.isdir(f_src):
+        continue
+    for entry in sorted(os.listdir(f_src)):
+        if entry in ('node_modules', '.git') or entry.endswith('.bak') or entry.endswith('.preimport.bak'):
+            continue
+        ep = os.path.join(f_src, entry)
+        rel_agent = f'{folder}/{entry}'
+
+        if os.path.islink(ep):
+            try:
+                resolved = os.path.realpath(ep)
+                if not os.path.exists(resolved):
+                    continue
+                if resolved.startswith(home):
+                    target_rel_home = os.path.relpath(resolved, home)
+                    storage_target = os.path.join(config_dir, 'home_targets', target_rel_home)
+                    os.makedirs(os.path.dirname(storage_target), exist_ok=True)
+                    if os.path.isdir(resolved):
+                        if os.path.exists(storage_target):
+                            shutil.rmtree(storage_target)
+                        shutil.copytree(resolved, storage_target, symlinks=False, ignore=ignore_patterns)
+                    else:
+                        shutil.copy2(resolved, storage_target)
+                    manifest.append({'type': 'symlink', 'linkRelAgent': rel_agent, 'targetRelHome': target_rel_home})
+                    print(f'   ✓ {rel_agent} -> ~/{target_rel_home} (physical files saved)')
+                else:
+                    storage_target = os.path.join(config_dir, folder, entry)
+                    os.makedirs(os.path.dirname(storage_target), exist_ok=True)
+                    if os.path.isdir(resolved):
+                        if os.path.exists(storage_target):
+                            shutil.rmtree(storage_target)
+                        shutil.copytree(resolved, storage_target, symlinks=False, ignore=ignore_patterns)
+                    else:
+                        shutil.copy2(resolved, storage_target)
+                    manifest.append({'type': 'direct', 'linkRelAgent': rel_agent})
+                    print(f'   ✓ {rel_agent} (system path dereferenced)')
+            except Exception:
+                pass
+        else:
+            storage_target = os.path.join(config_dir, folder, entry)
+            os.makedirs(os.path.dirname(storage_target), exist_ok=True)
+            if os.path.isdir(ep):
+                if os.path.exists(storage_target):
+                    shutil.rmtree(storage_target)
+                shutil.copytree(ep, storage_target, symlinks=False, ignore=ignore_patterns)
+            else:
+                shutil.copy2(ep, storage_target)
+            manifest.append({'type': 'direct', 'linkRelAgent': rel_agent})
+            print(f'   ✓ {rel_agent}')
+
+with open(os.path.join(config_dir, 'manifest.json'), 'w', encoding='utf-8') as mf:
+    json.dump(manifest, mf, indent=2)
+" "$AGENT_DIR" "$CONFIG_DIR"
+
+  echo "✅ Configuration backup complete."
+  git_sync_push "$CONFIG_DIR" "config: update settings, skills & symlink targets" "$CONFIG_DIR"
+}
+
+cmd_config_pull() {
+  git_sync_pull "$CONFIG_DIR"
+  if [[ ! -d "$CONFIG_DIR" ]]; then
+    echo "❌ Config backup directory not found: $CONFIG_DIR" >&2
+    exit 1
+  fi
+
+  echo "📥 Restoring configuration from $CONFIG_DIR (Strategia 4)..."
+
+  python3 -c "
+import os, sys, shutil, json
+
+agent_dir = sys.argv[1]
+config_dir = sys.argv[2]
+home = os.path.expanduser('~')
+ignore_patterns = shutil.ignore_patterns('.git', 'node_modules', '*.bak', '*.preimport.bak')
+
+# 1. settings.json with backup
+s_src = os.path.join(config_dir, 'settings.json')
+s_dst = os.path.join(agent_dir, 'settings.json')
+if os.path.isfile(s_src):
+    if os.path.isfile(s_dst):
+        shutil.copy2(s_dst, s_dst + '.preimport.bak')
+        print('   ✓ Backed up existing settings.json to settings.json.preimport.bak')
+    shutil.copy2(s_src, s_dst)
+    print('   ✓ Restored settings.json')
+
+# 2. prompts/
+p_src = os.path.join(config_dir, 'prompts')
+p_dst = os.path.join(agent_dir, 'prompts')
+if os.path.isdir(p_src):
+    if os.path.exists(p_dst):
+        shutil.rmtree(p_dst)
+    shutil.copytree(p_src, p_dst, ignore=ignore_patterns)
+    print('   ✓ Restored prompts/')
+
+# 3. Restore via manifest.json
+m_file = os.path.join(config_dir, 'manifest.json')
+if os.path.isfile(m_file):
+    with open(m_file, 'r', encoding='utf-8') as mf:
+        manifest = json.load(mf)
+    for item in manifest:
+        rel_agent = item.get('linkRelAgent')
+        if item.get('type') == 'symlink' and item.get('targetRelHome'):
+            rel_home = item['targetRelHome']
+            phys_target = os.path.join(home, rel_home)
+            storage_src = os.path.join(config_dir, 'home_targets', rel_home)
+            if os.path.exists(storage_src):
+                os.makedirs(os.path.dirname(phys_target), exist_ok=True)
+                if os.path.isdir(storage_src):
+                    if os.path.exists(phys_target):
+                        shutil.rmtree(phys_target)
+                    shutil.copytree(storage_src, phys_target, ignore=ignore_patterns)
+                else:
+                    shutil.copy2(storage_src, phys_target)
+            link_path = os.path.join(agent_dir, rel_agent)
+            os.makedirs(os.path.dirname(link_path), exist_ok=True)
+            if os.path.islink(link_path) or os.path.exists(link_path):
+                if os.path.islink(link_path) or os.path.isfile(link_path):
+                    os.remove(link_path)
+                else:
+                    shutil.rmtree(link_path)
+            rel_target = os.path.relpath(phys_target, os.path.dirname(link_path))
+            os.symlink(rel_target, link_path)
+            print(f'   ✓ {rel_agent} -> ~/{rel_home} (physical files + symlink restored)')
+        elif item.get('type') == 'direct':
+            src = os.path.join(config_dir, rel_agent)
+            dst = os.path.join(agent_dir, rel_agent)
+            if os.path.exists(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if os.path.isdir(src):
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(src, dst, ignore=ignore_patterns)
+                else:
+                    shutil.copy2(src, dst)
+                print(f'   ✓ Restored {rel_agent}')
+" "$AGENT_DIR" "$CONFIG_DIR"
+
+  echo "✅ Configuration restore complete. Restart Pi or run /reload."
+}
+
+VERSION="0.1.0-beta.1"
+
+show_help() {
+  cat <<'EOF'
+pi-sm: Zero-bloat Pi session & config sync manager (v0.1.0-beta.1)
+
+Commands (same inside Pi as /command and outside Pi as pi-sm command):
+  pi-sm session-push [tag] [--force]  Save active session to cloud
+  pi-sm session-pull                  Resume a cloud session into current project
+  pi-sm session-list         List, browse, resume, or delete saved cloud sessions
+  pi-sm session-delete       Delete a session from cloud
+  pi-sm config-push          Backup settings, skills, and prompts to cloud
+  pi-sm config-pull          Restore settings, skills, and prompts from cloud
+  pi-sm install              1-click install: CLI in ~/.local/bin, extension, and tab completion
+  pi-sm version              Show version
+  pi-sm help                 Show this help
+
+Environment Variables:
+  PI_STORAGE_DIR             Base sync directory (default: ~/OneDrive/PiSync or ~/.pi-sync)
+  PI_SAVE_SESSION            Custom directory for saving sessions (default: $PI_STORAGE_DIR/sessions)
+  PI_LOAD_SESSION            Custom directory for loading sessions (default: $PI_SAVE_SESSION)
+EOF
+}
+
+cmd_install() {
+  local script_path
+  script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  local repo_dir
+  repo_dir="$(cd "$(dirname "$script_path")/.." && pwd)"
+
+  echo "🚀 Installing pi-sm & Pi extension..."
+
+  # 1. Symlink CLI to ~/.local/bin/pi-sm
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$script_path" "$HOME/.local/bin/pi-sm"
+  chmod +x "$script_path"
+  echo "   ✓ CLI symlinked: ~/.local/bin/pi-sm"
+
+  # 2. Extension to ~/.pi/agent/extensions
+  local ext_src="$repo_dir/extensions/pi-session-manager.ts"
+  if [[ -f "$ext_src" ]]; then
+    mkdir -p "$AGENT_DIR/extensions"
+    cp "$ext_src" "$AGENT_DIR/extensions/pi-session-manager.ts"
+    echo "   ✓ Extension installed: ~/.pi/agent/extensions/pi-session-manager.ts"
+  fi
+
+  # 3. Shell completions
+  # Zsh:
+  local zsh_src="$repo_dir/completions/zsh/_pi-sm"
+  if [[ -f "$zsh_src" ]]; then
+    if [[ -d "/opt/homebrew/share/zsh/site-functions" && -w "/opt/homebrew/share/zsh/site-functions" ]]; then
+      cp "$zsh_src" "/opt/homebrew/share/zsh/site-functions/_pi-sm"
+      echo "   ✓ Zsh completion installed: /opt/homebrew/share/zsh/site-functions/_pi-sm"
+    else
+      local zsh_comp_dir="$HOME/.zsh/completions"
+      mkdir -p "$zsh_comp_dir"
+      cp "$zsh_src" "$zsh_comp_dir/_pi-sm"
+      if [[ -f "$HOME/.zshrc" ]] && ! grep -q "zsh/completions" "$HOME/.zshrc" 2>/dev/null; then
+        printf '\n# pi-sm completion\nfpath=(%s $fpath)\nautoload -Uz compinit && compinit -u\n' "$zsh_comp_dir" >> "$HOME/.zshrc"
+      fi
+      echo "   ✓ Zsh completion installed: ~/.zsh/completions/_pi-sm"
+    fi
+  fi
+
+  # Bash:
+  local bash_src="$repo_dir/completions/bash/pi-sm"
+  if [[ -f "$bash_src" ]]; then
+    local bash_comp_dir="$HOME/.local/share/bash-completion/completions"
+    mkdir -p "$bash_comp_dir"
+    cp "$bash_src" "$bash_comp_dir/pi-sm"
+    echo "   ✓ Bash completion installed: ~/.local/share/bash-completion/completions/pi-sm"
+  fi
+
+  echo ""
+  echo "✅ Installation complete! Next step on a new PC:"
+  echo "   pi-sm config-pull   # restores your settings, prompts, and skills from cloud"
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  session-push)   cmd_session_push "$@" ;;
+  session-pull)   cmd_session_pull "$@" ;;
+  session-list)   cmd_session_list "$@" ;;
+  session-delete) cmd_session_delete "$@" ;;
+  config-push)    cmd_config_push "$@" ;;
+  config-pull)    cmd_config_pull "$@" ;;
+  install)        cmd_install "$@" ;;
+  __preview)      render_preview "$@" ;;
+  version|--version|-v) echo "pi-sm v$VERSION" ;;
+  help|--help|-h) show_help ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    show_help
+    exit 1
+    ;;
+esac

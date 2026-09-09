@@ -1,0 +1,35 @@
+#compdef pi-sm
+
+_pi-sm() {
+  local -a commands
+  commands=(
+    'session-push:Salva la sessione attiva su Cloud'
+    'session-pull:Ripristina una sessione dal Cloud nel progetto attuale'
+    'session-list:Elenca o esplora le sessioni Cloud'
+    'session-delete:Elimina una sessione dal Cloud'
+    'config-push:Backup configurazione (settings, prompts, skills) nel Cloud'
+    'config-pull:Ripristina configurazione dal Cloud su disco'
+    'install:Installa CLI, estensione e autocompletamento in 1 clic'
+    'help:Mostra la guida'
+  )
+
+  _arguments -C \
+    '1:comando:->command' \
+    '*::argomenti:->args'
+
+  case "$state" in
+    command)
+      _describe -t commands 'comandi pi-sm' commands
+      ;;
+    args)
+      case "$words[1]" in
+        session-list)
+          _arguments \
+            '(--table -t)'{--table,-t}'[Mostra elenco in formato tabella]'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_pi-sm "$@"

@@ -1,0 +1,24 @@
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Node / Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Backups and temporary files
+*.bak
+*.preimport.bak
+*.tmp
+*.swp
+*~
+
+# Test sessions and local configs (never commit runtime data)
+*.jsonl
+*.meta.json
+sessions/
+config/
+home_targets/

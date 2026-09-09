@@ -1,0 +1,37 @@
+{
+  "name": "pi-session-manager",
+  "version": "0.1.0-beta.1",
+  "description": "Zero-bloat session & config manager for Pi Coding Agent across macOS and Linux machines (OneDrive/Git/Cloud)",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "session-manager",
+    "sync",
+    "onedrive",
+    "pi-coding-agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/r1cc4rd0m4zz4/pi-session-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/r1cc4rd0m4zz4/pi-session-manager/issues"
+  },
+  "homepage": "https://github.com/r1cc4rd0m4zz4/pi-session-manager#readme",
+  "bin": {
+    "pi-sm": "./bin/pi-sm"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi-session-manager.ts"
+    ]
+  },
+  "files": [
+    "bin/pi-sm",
+    "extensions/pi-session-manager.ts",
+    "completions/",
+    "README.md",
+    "LICENSE"
+  ]
+}
