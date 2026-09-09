@@ -1,0 +1,51 @@
+name: Security & Secret Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  gitleaks:
+    name: Gitleaks Secret Scanner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: false
+
+  quality:
+    name: Code Quality & Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate Bash Scripts
+        run: |
+          bash -n bin/pi-sm
+          bash -n .githooks/pre-push
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Verify TypeScript / Module Load
+        run: |
+          node -e '
+          (async () => {
+            const mod = await import("./extensions/pi-session-manager.ts");
+            if (typeof mod.default !== "function") {
+              throw new Error("Extension default export is not a function");
+            }
+          })();
+          '

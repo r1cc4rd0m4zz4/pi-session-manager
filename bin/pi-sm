@@ -1102,6 +1102,12 @@ cmd_install() {
     echo "   ✓ Bash completion installed: ~/.local/share/bash-completion/completions/pi-sm"
   fi
 
+  # 4. Git pre-push security hooks
+  if [[ -d "$repo_dir/.githooks" && -d "$repo_dir/.git" ]]; then
+    git -C "$repo_dir" config core.hooksPath .githooks 2>/dev/null || true
+    echo "   ✓ Git pre-push security hook activated (.githooks)"
+  fi
+
   echo ""
   echo "✅ Installation complete! Next step on a new PC:"
   echo "   pi-sm config-pull   # restores your settings, prompts, and skills from cloud"

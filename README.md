@@ -9,12 +9,14 @@ Works seamlessly with **OneDrive**, local mounts, or any private Git repository.
 ## Why pi-session-manager?
 
 When switching between macOS and Linux machines (e.g. MacBook on the go and Linux desktop at home), Pi sessions and configurations don't naturally sync:
+
 1. **Cross-OS Path Disconnect:** macOS uses `/Users/...` while Linux uses `/home/...`. Pi binds sessions to absolute paths, so sessions copied between OSes are invisible or fail to locate files.
 2. **Secret Leakage Risk:** Naive folder syncs accidentally upload `auth.json` (API keys) to cloud drives.
 3. **Binary Incompatibilities:** Syncing `~/.pi/agent/npm/` corrupts native compiled addons (macOS Darwin-arm64 vs Linux x86_64/aarch64).
 4. **Symlink Chains:** Custom skills and extensions often symlink to dotfiles (`~/.agents/skills/`) which break when copied as raw symlinks.
 
 `pi-session-manager` solves all of these with **zero third-party npm dependencies**:
+
 - **Automatic Re-homing:** Rewrites working directories and header paths on pull, so you can resume work on another machine instantly.
 - **Strict Security Guardrails:** Never touches `auth.json` (secrets remain local) and ignores `npm/` binaries.
 - **Physical Target Preservation (Strategy 4):** Resolves symlinks to physical targets in your home folder, backs them up, and recreates the exact symlink tree on the target PC.
@@ -35,6 +37,7 @@ git clone https://github.com/r1cc4rd0m4zz4/pi-session-manager.git ~/gitapp/pi-se
 ```
 
 This automatically:
+
 - Symlinks `pi-sm` to `~/.local/bin/pi-sm`.
 - Installs the Pi extension to `~/.pi/agent/extensions/pi-session-manager.ts`.
 - Registers shell TAB autocompletion for **Zsh** and **Bash**.
@@ -67,12 +70,14 @@ Command names and behaviors are **1:1 identical** inside and outside Pi:
 ### 1. Moving between macOS and Linux
 
 **On your macOS machine:**
+
 ```bash
 # Inside Pi (or outside via `pi-sm session-push feature-x`)
 /session-push feature-x
 ```
 
 **On your Linux machine:**
+
 ```bash
 # In the project directory on Linux:
 pi-sm session-pull
@@ -94,12 +99,14 @@ pi-sm config-pull
 ## Storage & Cloud Detection
 
 By default, `pi-session-manager` automatically discovers your cloud storage in this order:
+
 1. `$PI_STORAGE_DIR` (if set)
 2. `~/OneDrive/PiSync`
 3. `~/Library/CloudStorage/OneDrive*/PiSync` (macOS CloudStorage)
 4. Fallback: `~/.pi-sync`
 
-### Storage Layout:
+### Storage Layout
+
 ```
 <CloudStorage>/PiSync/
 ├── sessions/
@@ -121,7 +128,7 @@ By default, `pi-session-manager` automatically discovers your cloud storage in t
 | `PI_STORAGE_DIR` | Base cloud sync directory | `~/OneDrive/PiSync` or `~/.pi-sync` |
 | `PI_SAVE_SESSION` | Custom directory for pushed sessions | `$PI_STORAGE_DIR/sessions` |
 | `PI_LOAD_SESSION` | Custom directory for pulled sessions | `$PI_STORAGE_DIR/sessions` |
-| `PI_CODING_AGENT_DIR`| Pi agent home directory | `~/.pi/agent` |
+| `PI_CODING_AGENT_DIR` | Pi agent home directory | `~/.pi/agent` |
 
 ---
 

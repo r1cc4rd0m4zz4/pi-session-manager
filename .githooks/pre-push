@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Git pre-push hook: deterministic security & secret scanner
+
+set -euo pipefail
+
+echo "🔍 Running pre-push security & deterministic checks..."
+
+# 1. Gitleaks Secret Detection
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks dir --no-banner .; then
+    echo "❌ [SECURITY ALERT] Gitleaks detected secrets or credentials!" >&2
+    echo "   Aborting push. Please remove sensitive keys or tokens." >&2
+    exit 1
+  fi
+  echo "   ✓ Gitleaks: No secrets detected."
+else
+  echo "   ⚠️  Gitleaks not installed on this machine, skipping secret check."
+fi
+
+# 2. Hardcoded Personal User Paths & PII
+FORBIDDEN_PATTERNS=(
+  "/Users/mazric"
+  "/home/mazric"
+  "ghp_"
+  "xoxb-"
+  "AKIA[0-9A-Z]{16}"
+)
+
+ERRORS=0
+for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
+  MATCHES=$(git grep -inE "$pattern" -- ':(exclude).githooks' 2>/dev/null || true)
+  if [[ -n "$MATCHES" ]]; then
+    echo "❌ [SECURITY ALERT] Forbidden pattern or personal path detected: '$pattern'" >&2
+    echo "$MATCHES" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+done
+
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "❌ Push blocked: Found $ERRORS security/privacy violation(s)." >&2
+  exit 1
+fi
+echo "   ✓ PII & Personal Paths: Clean."
+
+# 3. Syntax Validation
+if [[ -f "bin/pi-sm" ]]; then
+  bash -n bin/pi-sm
+  echo "   ✓ Bash syntax: Valid."
+fi
+
+echo "✅ All pre-push security checks passed!"
+exit 0
