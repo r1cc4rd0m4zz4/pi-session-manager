@@ -141,6 +141,14 @@ By default, `pi-session-manager` automatically discovers your cloud storage in t
 
 ---
 
+## Security & Privacy Notice
+
+- **Secrets Stay Local:** `pi-session-manager` explicitly excludes `auth.json` (API keys) and `npm/` native binaries. No credentials are ever uploaded or synced.
+- **Private Cloud Storage:** While API keys are protected, session transcripts and prompt history will be synchronized to your designated cloud folder. Ensure your OneDrive, sync directory, or private Git repository has appropriate access permissions.
+- **Provided "AS IS":** This software is provided under the terms of the [MIT License](LICENSE) without warranty of any kind.
+
+---
+
 ## License
 
 [MIT](LICENSE)
