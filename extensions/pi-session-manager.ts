@@ -645,7 +645,7 @@ export default function (pi: ExtensionAPI): void {
 		try {
 			const dest = rehomeSession(selected.fullPath, ctx.cwd);
 			await ctx.switchSession(dest, {
-				withSession: async (newCtx) => {
+				withSession: async (newCtx: ExtensionCommandContext) => {
 					newCtx.ui.notify(`✅ Sessione ripresa: ${path.basename(dest)}`, "info");
 				},
 			});
