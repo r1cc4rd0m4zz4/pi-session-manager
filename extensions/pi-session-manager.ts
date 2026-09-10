@@ -417,7 +417,8 @@ function cloudSessionLabel(item: CloudSessionItem, idx: number): string {
 	const snippet = item.dialogue.firstPrompt
 		? ` "${item.dialogue.firstPrompt.slice(0, 20)}…"`
 		: "";
-	const badge = item.dialogue.msgCount > 0 ? ` (${item.dialogue.msgCount}m)` : "";
+	const badge =
+		item.dialogue.msgCount > 0 ? ` (${item.dialogue.msgCount}m)` : "";
 	const dateStr = formatShortDate(item.mtime);
 
 	return `${idx + 1}. ${projPrefix}${tagText}${snippet}${badge} · ${dateStr}`;
@@ -657,7 +658,8 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	pi.registerCommand("session-pull", {
-		description: "Scegli e riprendi una sessione dal Cloud con anteprima (Re-home)",
+		description:
+			"Scegli e riprendi una sessione dal Cloud con anteprima (Re-home)",
 		handler: handleSessionPull,
 	});
 
@@ -685,10 +687,11 @@ export default function (pi: ExtensionAPI): void {
 
 		const tag = selected.meta.name || selected.file;
 		const proj = selected.meta.projectName || path.basename(ctx.cwd);
-		const action = await ctx.ui.select(
-			`Sessione: ${tag}`,
-			["1. 👁️ Anteprima & Riprendi", "2. 🗑️ Elimina dal Cloud", "3. ✖️ Annulla"],
-		);
+		const action = await ctx.ui.select(`Sessione: ${tag}`, [
+			"1. 👁️ Anteprima & Riprendi",
+			"2. 🗑️ Elimina dal Cloud",
+			"3. ✖️ Annulla",
+		]);
 		if (!action || action.startsWith("3")) return;
 
 		if (action.startsWith("1")) {
@@ -740,10 +743,7 @@ export default function (pi: ExtensionAPI): void {
 					selected.fullPath,
 					metaPath,
 				]);
-				ctx.ui.notify(
-					`🗑️ Sessione eliminata: ${tag}`,
-					"info",
-				);
+				ctx.ui.notify(`🗑️ Sessione eliminata: ${tag}`, "info");
 			} catch (err) {
 				ctx.ui.notify(
 					`Errore eliminazione: ${err instanceof Error ? err.message : String(err)}`,
@@ -754,7 +754,8 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	pi.registerCommand("session-list", {
-		description: "Visualizza sessioni Cloud con anteprima, ripristino ed eliminazione",
+		description:
+			"Visualizza sessioni Cloud con anteprima, ripristino ed eliminazione",
 		handler: handleSessionList,
 	});
 
@@ -806,10 +807,7 @@ export default function (pi: ExtensionAPI): void {
 				selected.fullPath,
 				metaPath,
 			]);
-			ctx.ui.notify(
-				`🗑️ Sessione eliminata: ${tag}`,
-				"info",
-			);
+			ctx.ui.notify(`🗑️ Sessione eliminata: ${tag}`, "info");
 		} catch (err) {
 			ctx.ui.notify(
 				`Errore eliminazione: ${err instanceof Error ? err.message : String(err)}`,
@@ -838,8 +836,16 @@ export default function (pi: ExtensionAPI): void {
 		const manifest: ConfigManifestItem[] = [];
 		const touchedFiles: string[] = [];
 
-		// 1. settings.json & AGENTS.md
-		for (const fname of ["settings.json", "AGENTS.md"]) {
+		// 1. Root configuration files
+		const rootConfigFiles = [
+			"settings.json",
+			"AGENTS.md",
+			"APPEND_SYSTEM.md",
+			"SYSTEM.md",
+			"models.json",
+			"keybindings.json",
+		];
+		for (const fname of rootConfigFiles) {
 			const src = path.join(agentDir, fname);
 			const dst = path.join(configDir, fname);
 			if (fs.existsSync(src)) {
@@ -848,12 +854,14 @@ export default function (pi: ExtensionAPI): void {
 			}
 		}
 
-		// 2. prompts/
-		const promptsSrc = path.join(agentDir, "prompts");
-		const promptsDst = path.join(configDir, "prompts");
-		if (fs.existsSync(promptsSrc)) {
-			cleanCopy(promptsSrc, promptsDst, { recursive: true });
-			touchedFiles.push(promptsDst);
+		// 2. Prompts and Themes directories
+		for (const folder of ["prompts", "themes"]) {
+			const src = path.join(agentDir, folder);
+			const dst = path.join(configDir, folder);
+			if (fs.existsSync(src)) {
+				cleanCopy(src, dst, { recursive: true });
+				touchedFiles.push(dst);
+			}
 		}
 
 		// 3. skills/ & extensions/
@@ -961,8 +969,16 @@ export default function (pi: ExtensionAPI): void {
 			if (!ok) return;
 		}
 
-		// 1. settings.json & AGENTS.md
-		for (const fname of ["settings.json", "AGENTS.md"]) {
+		// 1. Root configuration files with backup
+		const rootConfigFiles = [
+			"settings.json",
+			"AGENTS.md",
+			"APPEND_SYSTEM.md",
+			"SYSTEM.md",
+			"models.json",
+			"keybindings.json",
+		];
+		for (const fname of rootConfigFiles) {
 			const src = path.join(configDir, fname);
 			const dst = path.join(agentDir, fname);
 			if (fs.existsSync(src)) {
@@ -973,11 +989,13 @@ export default function (pi: ExtensionAPI): void {
 			}
 		}
 
-		// 2. prompts/
-		const promptsSrc = path.join(configDir, "prompts");
-		const promptsDst = path.join(agentDir, "prompts");
-		if (fs.existsSync(promptsSrc)) {
-			cleanCopy(promptsSrc, promptsDst, { recursive: true });
+		// 2. Prompts and Themes directories
+		for (const folder of ["prompts", "themes"]) {
+			const src = path.join(configDir, folder);
+			const dst = path.join(agentDir, folder);
+			if (fs.existsSync(src)) {
+				cleanCopy(src, dst, { recursive: true });
+			}
 		}
 
 		// 3. manifest

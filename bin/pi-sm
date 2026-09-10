@@ -869,21 +869,23 @@ home = os.path.expanduser('~')
 os.makedirs(config_dir, exist_ok=True)
 ignore_patterns = shutil.ignore_patterns('.git', 'node_modules', '*.bak', '*.preimport.bak')
 
-# 1. settings.json & AGENTS.md
-for fname in ['settings.json', 'AGENTS.md']:
-    s_src = os.path.join(agent_dir, fname)
-    if os.path.isfile(s_src):
-        shutil.copy2(s_src, os.path.join(config_dir, fname))
+# 1. Root configuration files
+root_config_files = ['settings.json', 'AGENTS.md', 'APPEND_SYSTEM.md', 'SYSTEM.md', 'models.json', 'keybindings.json']
+for fname in root_config_files:
+    src = os.path.join(agent_dir, fname)
+    if os.path.isfile(src):
+        shutil.copy2(src, os.path.join(config_dir, fname))
         print(f'   ✓ {fname}')
 
-# 2. prompts/
-p_src = os.path.join(agent_dir, 'prompts')
-p_dst = os.path.join(config_dir, 'prompts')
-if os.path.isdir(p_src):
-    if os.path.exists(p_dst):
-        shutil.rmtree(p_dst)
-    shutil.copytree(p_src, p_dst, ignore=ignore_patterns)
-    print('   ✓ prompts/')
+# 2. Prompts & Themes directories
+for folder in ['prompts', 'themes']:
+    src = os.path.join(agent_dir, folder)
+    dst = os.path.join(config_dir, folder)
+    if os.path.isdir(src):
+        if os.path.exists(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst, ignore=ignore_patterns)
+        print(f'   ✓ {folder}/')
 
 # 3. skills & extensions with physical target preservation
 manifest = []
@@ -965,25 +967,27 @@ config_dir = sys.argv[2]
 home = os.path.expanduser('~')
 ignore_patterns = shutil.ignore_patterns('.git', 'node_modules', '*.bak', '*.preimport.bak')
 
-# 1. settings.json & AGENTS.md with backup
-for fname in ['settings.json', 'AGENTS.md']:
-    s_src = os.path.join(config_dir, fname)
-    s_dst = os.path.join(agent_dir, fname)
-    if os.path.isfile(s_src):
-        if os.path.isfile(s_dst):
-            shutil.copy2(s_dst, s_dst + '.preimport.bak')
+# 1. Root configuration files with backup
+root_config_files = ['settings.json', 'AGENTS.md', 'APPEND_SYSTEM.md', 'SYSTEM.md', 'models.json', 'keybindings.json']
+for fname in root_config_files:
+    src = os.path.join(config_dir, fname)
+    dst = os.path.join(agent_dir, fname)
+    if os.path.isfile(src):
+        if os.path.isfile(dst):
+            shutil.copy2(dst, dst + '.preimport.bak')
             print(f'   ✓ Backed up existing {fname} to {fname}.preimport.bak')
-        shutil.copy2(s_src, s_dst)
+        shutil.copy2(src, dst)
         print(f'   ✓ Restored {fname}')
 
-# 2. prompts/
-p_src = os.path.join(config_dir, 'prompts')
-p_dst = os.path.join(agent_dir, 'prompts')
-if os.path.isdir(p_src):
-    if os.path.exists(p_dst):
-        shutil.rmtree(p_dst)
-    shutil.copytree(p_src, p_dst, ignore=ignore_patterns)
-    print('   ✓ Restored prompts/')
+# 2. Prompts & Themes directories
+for folder in ['prompts', 'themes']:
+    src = os.path.join(config_dir, folder)
+    dst = os.path.join(agent_dir, folder)
+    if os.path.isdir(src):
+        if os.path.exists(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst, ignore=ignore_patterns)
+        print(f'   ✓ Restored {folder}/')
 
 # 3. Restore via manifest.json
 m_file = os.path.join(config_dir, 'manifest.json')
