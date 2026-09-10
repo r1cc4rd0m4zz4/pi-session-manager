@@ -1,7 +1,7 @@
 _pi_sm_bash() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
   local prev="${COMP_WORDS[COMP_CWORD-1]}"
-  local commands="session-push session-pull session-list session-delete config-push config-pull install help"
+  local commands="session-push session-pull session-list session-delete config-push config-pull install version help"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
     COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -9,6 +9,10 @@ _pi_sm_bash() {
   fi
 
   case "$prev" in
+    session-push)
+      COMPREPLY=($(compgen -W "--force -f" -- "$cur"))
+      return 0
+      ;;
     session-list)
       COMPREPLY=($(compgen -W "--table -t" -- "$cur"))
       return 0

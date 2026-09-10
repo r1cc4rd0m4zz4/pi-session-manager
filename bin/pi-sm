@@ -76,7 +76,6 @@ git_sync_push() {
   local msg="${2:-pi-sync: update}"
   shift 2 || true
   if [[ -n "$root" ]]; then
-    git -C "$root" pull --quiet --rebase 2>/dev/null || true
     if [[ $# -gt 0 ]]; then
       local rel_files=()
       for f in "$@"; do
@@ -90,6 +89,7 @@ git_sync_push() {
       git -C "$root" add -A 2>/dev/null || true
     fi
     git -C "$root" commit -m "$msg" --quiet 2>/dev/null || true
+    git -C "$root" pull --quiet --rebase 2>/dev/null || true
     git -C "$root" push --quiet 2>/dev/null || true
   fi
 }

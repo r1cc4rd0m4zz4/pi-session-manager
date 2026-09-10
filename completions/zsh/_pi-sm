@@ -10,6 +10,7 @@ _pi-sm() {
     'config-push:Backup configurazione (settings, prompts, skills) nel Cloud'
     'config-pull:Ripristina configurazione dal Cloud su disco'
     'install:Installa CLI, estensione e autocompletamento in 1 clic'
+    'version:Mostra la versione installata'
     'help:Mostra la guida'
   )
 
@@ -23,6 +24,10 @@ _pi-sm() {
       ;;
     args)
       case "$words[1]" in
+        session-push)
+          _arguments \
+            '(--force -f)'{--force,-f}'[Sovrascrivi senza conferma se gia esistente]'
+          ;;
         session-list)
           _arguments \
             '(--table -t)'{--table,-t}'[Mostra elenco in formato tabella]'

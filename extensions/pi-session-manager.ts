@@ -169,9 +169,16 @@ function gitPushAsync(dir: string, msg: string, files: string[]): void {
 				() => {
 					execFile(
 						"git",
-						["push", "--quiet"],
-						{ cwd: root, timeout: 8000 },
-						() => {},
+						["pull", "--quiet", "--rebase"],
+						{ cwd: root, timeout: 5000 },
+						() => {
+							execFile(
+								"git",
+								["push", "--quiet"],
+								{ cwd: root, timeout: 8000 },
+								() => {},
+							);
+						},
 					);
 				},
 			);
