@@ -18,8 +18,10 @@ When switching between macOS and Linux machines (e.g. MacBook on the go and Linu
 `pi-session-manager` solves all of these with **zero third-party npm dependencies**:
 
 - **Automatic Re-homing:** Rewrites working directories and header paths on pull, so you can resume work on another machine instantly.
+- **Self-Contained Session Containers:** Bundles the session transcript and auxiliary extension data into a single `.pi-session.tar.gz` container with instant metadata caching.
+- **Zero Zombie Chunks:** Pre-cleans destination session targets on re-home to ensure no orphaned artifacts remain.
 - **Strict Security Guardrails:** Never touches `auth.json` (secrets remain local) and ignores `npm/` binaries.
-- **Physical Target Preservation (Strategy 4):** Resolves symlinks to physical targets in your home folder, backs them up, and recreates the exact symlink tree on the target PC.
+- **Physical Target Preservation:** Resolves symlinks to physical targets in your home folder, backs them up, and recreates the exact symlink tree on the target PC.
 - **Dual Interface:** Interactive `fzf` CLI outside Pi (`pi-sm`) + lightweight native TUI commands inside Pi.
 - **Silent Git Sync:** If your storage folder is a Git repo, it automatically pulls and commits/pushes changes silently in the background.
 
@@ -107,16 +109,17 @@ By default, `pi-session-manager` automatically discovers your cloud storage in t
 
 ### Storage Layout
 
-```
+```text
 <CloudStorage>/PiSync/
 ├── sessions/
-│   ├── <project>--<tag>.jsonl
-│   └── <project>--<tag>.meta.json
+│   ├── <project>--<tag>.pi-session.tar.gz  # Compressed self-contained session container
+│   └── <project>--<tag>.meta.json          # Enriched metadata & instant dialogue preview
 └── config/
     ├── settings.json
+    ├── sol-pi.json                         # Global SoL-Pi config (synced safely)
     ├── prompts/
-    ├── home_targets/          # Physical files resolved from ~/.agents/...
-    └── manifest.json          # Symlink & file layout map
+    ├── home_targets/                       # Physical files resolved from ~/.agents/...
+    └── manifest.json                       # Symlink & file layout map
 ```
 
 ---
@@ -129,6 +132,28 @@ By default, `pi-session-manager` automatically discovers your cloud storage in t
 | `PI_SAVE_SESSION` | Custom directory for pushed sessions | `$PI_STORAGE_DIR/sessions` |
 | `PI_LOAD_SESSION` | Custom directory for pulled sessions | `$PI_STORAGE_DIR/sessions` |
 | `PI_CODING_AGENT_DIR` | Pi agent home directory | `~/.pi/agent` |
+
+---
+
+## External Integrations & Compatibility
+
+### ⚡ SoL-Pi Integration ([NVlabs/SoL-Pi](https://github.com/NVlabs/SoL-Pi))
+
+`pi-session-manager` includes native, out-of-the-box compatibility with NVIDIA's **SoL-Pi** research harness:
+
+- **ObservationPack Asset Preservation:** When SoL-Pi's `observationPack` archives large tool outputs (>10KB) under `<sessionDir>/sol-pi/<sessionId>/`, `pi-session-manager` packages the auxiliary storage directly into the `.pi-session.tar.gz` container.
+- **Cross-Platform `obs_recall`:** Moving sessions between macOS and Linux automatically re-homes `<sessionDir>/sol-pi/<sessionId>/`, ensuring the `obs_recall` tool never fails with missing file errors (`ENOENT`).
+- **Global Configuration Sync:** `sol-pi.json` in `~/.pi/agent/` is automatically backed up and restored via `config-push` and `config-pull`, preserving feature flags across machines.
+- **Zero Orphaned Chunks:** Target directories are cleanly replaced during re-home, eliminating obsolete or stale observation chunks.
+- **Visual Indicator:** Sessions containing SoL-Pi data are flagged with a `⚡` badge in `session-list` and interactive CLI previews.
+
+### 🧩 Architecture for Future Integrations
+
+`pi-session-manager` provides a general-purpose, extensible container model for Pi ecosystem tools:
+
+- **Auxiliary Session Directories:** Any extension maintaining session-scoped local storage under `~/.pi/agent/sessions/<project>/<extension-id>/<sessionId>/` can be packaged inside `.pi-session.tar.gz` without breaking portability.
+- **Safe Root Config Whitelist:** Configuration files are synced via an explicit whitelist (`settings.json`, `sol-pi.json`, `models.json`, `keybindings.json`, `AGENTS.md`, `APPEND_SYSTEM.md`, `SYSTEM.md`), completely preventing credential leakage (`auth.json` is strictly air-gapped).
+- **Zero Third-Party Dependencies:** All compression and re-homing operations rely exclusively on native system utilities (`tar`, `gzip`) and standard libraries (`node:child_process`, Python's `tarfile`), keeping your harness lean and maintenance-free.
 
 ---
 

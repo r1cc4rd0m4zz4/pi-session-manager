@@ -94,6 +94,10 @@ git_sync_push() {
   fi
 }
 
+has_interactive_fzf() {
+  command -v fzf >/dev/null 2>&1 && [ -t 0 ] && [ -t 1 ]
+}
+
 current_project_session_dir() {
   local cwd
   cwd="$(pwd -P)"
@@ -111,7 +115,7 @@ render_preview() {
   fi
 
   python3 -c '
-import sys, json, os
+import sys, json, os, tarfile
 
 session_file = sys.argv[1]
 
@@ -123,21 +127,88 @@ DIM = "\033[2m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
+# 1. Fast read from companion .meta.json if present
+base = session_file
+if base.endswith(".pi-session.tar.gz"):
+    base = base[:-len(".pi-session.tar.gz")]
+elif base.endswith(".jsonl"):
+    base = base[:-len(".jsonl")]
+meta_file = base + ".meta.json"
+
+if os.path.isfile(meta_file):
+    try:
+        with open(meta_file, "r", encoding="utf-8") as mf:
+            m = json.load(mf)
+        diag = m.get("dialogue")
+        if diag and isinstance(diag, dict) and "firstPrompt" in diag:
+            proj = m.get("projectName", "unknown")
+            cwd = m.get("projectCwd", "")
+            disp_name = m.get("name") or m.get("tag", os.path.basename(base))
+            has_sol_pi = bool(m.get("hasSolPi"))
+            msg_count = diag.get("msgCount", 0)
+            p1 = diag.get("firstPrompt", "")
+            r1 = diag.get("firstReply", "")
+            pLast = diag.get("lastPrompt", "")
+            rLast = diag.get("lastReply", "")
+            sol_note = f" {YELLOW}⚡ [SoL-Pi data included]{RESET}" if has_sol_pi else ""
+
+            print(f"{CYAN}{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}")
+            print(f"{BOLD}📂 Project:{RESET}  {proj} {DIM}({cwd}){RESET}")
+            print(f"{BOLD}🏷️  Session:{RESET}  {YELLOW}{disp_name}{RESET}{sol_note}")
+            print(f"{BOLD}💬 Turns:{RESET}    {msg_count} dialog messages")
+            print(f"{CYAN}{BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}\n")
+
+            def print_msg(role, text, label):
+                header = f"{BLUE}{BOLD}👤 {label}:{RESET}" if role == "user" else f"{GREEN}{BOLD}🤖 {label}:{RESET}"
+                lines_t = text.split("\n")
+                short = "\n".join(lines_t[:6])
+                if len(lines_t) > 6 or len(text) > 400:
+                    short = short[:400] + f" {DIM}...[truncated]{RESET}"
+                print(f"{header}\n  {short}\n")
+
+            if p1:
+                print(f"{GREEN}{BOLD}▶ INIZIO CONVERSAZIONE:{RESET}")
+                print_msg("user", p1, "User [inizio]")
+                if r1 and (msg_count <= 2 or not pLast):
+                    print_msg("assistant", r1, "Assistant [inizio]")
+
+            if (pLast or rLast) and msg_count > 2:
+                print(f"{DIM}  ⋯ ⋯ ⋯ [messaggi intermedi omessi per brevità] ⋯ ⋯ ⋯{RESET}\n")
+                print(f"{YELLOW}{BOLD}▶ ULTIMI MESSAGGI (stato recente):{RESET}")
+                if pLast:
+                    print_msg("user", pLast, "User [fine]")
+                if rLast:
+                    print_msg("assistant", rLast, "Assistant [fine]")
+            sys.exit(0)
+    except Exception:
+        pass
+
 lines = []
 has_omitted_split = False
 try:
-    with open(session_file, "r", encoding="utf-8") as f:
-        f.seek(0, os.SEEK_END)
-        size = f.tell()
-        f.seek(0)
-        if size <= 128 * 1024:
-            lines = f.readlines()
-        else:
-            has_omitted_split = True
-            head_chunk = f.read(64 * 1024).splitlines(keepends=True)
-            f.seek(size - 64 * 1024)
-            tail_chunk = f.read(64 * 1024).splitlines(keepends=True)[1:]
-            lines = head_chunk + ["__OMITTED__\n"] + tail_chunk
+    if session_file.endswith(".pi-session.tar.gz") or tarfile.is_tarfile(session_file):
+        with tarfile.open(session_file, "r:gz") as tar:
+            f_in_tar = tar.extractfile("session.jsonl")
+            if f_in_tar:
+                raw_lines = [l.decode("utf-8", errors="replace") for l in f_in_tar.readlines()]
+                if len(raw_lines) <= 100:
+                    lines = raw_lines
+                else:
+                    has_omitted_split = True
+                    lines = raw_lines[:50] + ["__OMITTED__\n"] + raw_lines[-50:]
+    else:
+        with open(session_file, "r", encoding="utf-8") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(0)
+            if size <= 128 * 1024:
+                lines = f.readlines()
+            else:
+                has_omitted_split = True
+                head_chunk = f.read(64 * 1024).splitlines(keepends=True)
+                f.seek(size - 64 * 1024)
+                tail_chunk = f.read(64 * 1024).splitlines(keepends=True)[1:]
+                lines = head_chunk + ["__OMITTED__\n"] + tail_chunk
 except Exception as e:
     print(f"Error reading session: {e}")
     sys.exit(0)
@@ -273,8 +344,87 @@ for fp in files:
 ' "$dir"
 }
 
+auto_migrate_cloud_sessions() {
+  local dir="$1"
+  python3 -c '
+import os, sys, json, tarfile
+
+dir_path = sys.argv[1]
+if not os.path.isdir(dir_path):
+    sys.exit(0)
+
+def extract_preview(filepath):
+    first_p = ""
+    first_r = ""
+    last_p = ""
+    last_r = ""
+    count = 0
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line_s = line.strip()
+                if not line_s: continue
+                try:
+                    e = json.loads(line_s)
+                    if e.get("type") == "message":
+                        count += 1
+                        m = e.get("message", {})
+                        r = m.get("role")
+                        c = m.get("content", "")
+                        t = ""
+                        if isinstance(c, str): t = c
+                        elif isinstance(c, list):
+                            t = " ".join([b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"])
+                        t = t.replace("\r", " ").replace("\n", " ").strip()
+                        if r == "user":
+                            if not first_p: first_p = t
+                            last_p = t
+                        elif r == "assistant":
+                            if not first_r: first_r = t
+                            last_r = t
+                except Exception: pass
+    except Exception: pass
+    return {"firstPrompt": first_p, "firstReply": first_r, "lastPrompt": last_p, "lastReply": last_r, "msgCount": count}
+
+migrated = False
+for f in os.listdir(dir_path):
+    if f.endswith(".jsonl") and not f.endswith(".meta.json"):
+        base = f[:-6]
+        tar_path = os.path.join(dir_path, f"{base}.pi-session.tar.gz")
+        jsonl_path = os.path.join(dir_path, f)
+        meta_path = os.path.join(dir_path, f"{base}.meta.json")
+        if not os.path.exists(tar_path):
+            try:
+                diag = extract_preview(jsonl_path)
+                meta = {}
+                if os.path.isfile(meta_path):
+                    try:
+                        with open(meta_path, "r", encoding="utf-8") as mf:
+                            meta = json.load(mf)
+                    except Exception: pass
+                meta["dialogue"] = diag
+                meta["hasSolPi"] = False
+                with open(meta_path, "w", encoding="utf-8") as mf:
+                    json.dump(meta, mf, indent=2)
+                
+                with tarfile.open(tar_path, "w:gz") as tar:
+                    tar.add(jsonl_path, arcname="session.jsonl")
+                try:
+                    os.remove(jsonl_path)
+                    migrated = True
+                except Exception: pass
+            except Exception: pass
+        else:
+            try:
+                os.remove(jsonl_path)
+                migrated = True
+            except Exception: pass
+' "$dir" 2>/dev/null || true
+}
+
 format_cloud_session_list() {
   local dir="$1"
+  auto_migrate_cloud_sessions "$dir"
   python3 -c '
 import os, sys, json, time
 
@@ -282,7 +432,7 @@ dir_path = sys.argv[1]
 if not os.path.isdir(dir_path):
     sys.exit(0)
 
-files = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.endswith(".jsonl")]
+files = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.endswith(".pi-session.tar.gz")]
 files = sorted(files, key=lambda p: os.path.getmtime(p), reverse=True)
 
 BOLD = "\033[1m"
@@ -293,54 +443,43 @@ RESET = "\033[0m"
 
 for fp in files:
     mtime_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(fp)))
-    meta_path = os.path.splitext(fp)[0] + ".meta.json"
+    base_name = os.path.basename(fp)[:-len(".pi-session.tar.gz")]
+    meta_path = os.path.join(dir_path, f"{base_name}.meta.json")
     proj = ""
     tag = ""
+    first_prompt = ""
+    msg_count = 0
+    has_sol_pi = False
     if os.path.isfile(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as mf:
                 m = json.load(mf)
                 proj = m.get("projectName", "")
                 tag = m.get("name") or m.get("tag", "")
+                has_sol_pi = bool(m.get("hasSolPi"))
+                d = m.get("dialogue", {})
+                first_prompt = d.get("firstPrompt", "")
+                msg_count = d.get("msgCount", 0)
         except Exception: pass
     
     if not proj or not tag:
-        base = os.path.splitext(os.path.basename(fp))[0]
-        if "--" in base:
-            parts = base.split("--")
+        if "--" in base_name:
+            parts = base_name.split("--")
             if not proj: proj = parts[0]
             if not tag: tag = parts[1]
 
-    first_prompt = ""
-    msg_count = 0
-    try:
-        with open(fp, "r", encoding="utf-8") as f:
-            for _ in range(60):
-                line = f.readline()
-                if not line: break
-                try:
-                    e = json.loads(line.strip())
-                    if e.get("type") == "message":
-                        msg_count += 1
-                        msg = e.get("message", {})
-                        if msg.get("role") == "user" and not first_prompt:
-                            content = msg.get("content", "")
-                            if isinstance(content, str): first_prompt = content
-                            elif isinstance(content, list):
-                                first_prompt = " ".join([b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"])
-                except Exception: pass
-    except Exception: pass
-            
     proj_badge = f"{CYAN}[{proj[:10]}]{RESET} " if proj else ""
-    title = tag[:18] if tag else (first_prompt[:35] if first_prompt else os.path.basename(fp)[:20])
+    title = tag[:18] if tag else (first_prompt[:35] if first_prompt else base_name[:20])
     title = title.replace("\n", " ").strip()
-    line = f"{DIM}{mtime_str}{RESET} │ {proj_badge}{BOLD}{title}{RESET} {DIM}({msg_count} msgs){RESET}\t{fp}"
+    sol_badge = f" {YELLOW}⚡{RESET}" if has_sol_pi else ""
+    line = f"{DIM}{mtime_str}{RESET} │ {proj_badge}{BOLD}{title}{RESET} {DIM}({msg_count} msgs){RESET}{sol_badge}\t{fp}"
     print(line)
 ' "$dir"
 }
 
 print_table_sessions() {
   local dir="$1"
+  auto_migrate_cloud_sessions "$dir"
   python3 -c '
 import os, sys, json, time
 
@@ -349,7 +488,7 @@ if not os.path.isdir(dir_path):
     print("Storage directory does not exist: " + dir_path)
     sys.exit(0)
 
-files = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.endswith(".jsonl")]
+files = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.endswith(".pi-session.tar.gz")]
 files = sorted(files, key=lambda p: os.path.getmtime(p), reverse=True)
 
 BOLD = "\033[1m"
@@ -369,43 +508,28 @@ total_bytes = 0
 for fp in files:
     total_bytes += os.path.getsize(fp)
     mtime_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(fp)))
-    meta_path = os.path.splitext(fp)[0] + ".meta.json"
+    base_name = os.path.basename(fp)[:-len(".pi-session.tar.gz")]
+    meta_path = os.path.join(dir_path, f"{base_name}.meta.json")
     proj = ""
     tag = ""
+    first_prompt = ""
+    msg_count = 0
     if os.path.isfile(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as mf:
                 m = json.load(mf)
                 proj = m.get("projectName", "")
                 tag = m.get("name") or m.get("tag", "")
+                d = m.get("dialogue", {})
+                first_prompt = d.get("firstPrompt", "")
+                msg_count = d.get("msgCount", 0)
         except Exception: pass
     
     if not proj or not tag:
-        base = os.path.splitext(os.path.basename(fp))[0]
-        if "--" in base:
-            parts = base.split("--")
+        if "--" in base_name:
+            parts = base_name.split("--")
             if not proj: proj = parts[0]
             if not tag: tag = parts[1]
-
-    first_prompt = ""
-    msg_count = 0
-    try:
-        with open(fp, "r", encoding="utf-8") as f:
-            for _ in range(60):
-                line = f.readline()
-                if not line: break
-                try:
-                    e = json.loads(line.strip())
-                    if e.get("type") == "message":
-                        msg_count += 1
-                        msg = e.get("message", {})
-                        if msg.get("role") == "user" and not first_prompt:
-                            content = msg.get("content", "")
-                            if isinstance(content, str): first_prompt = content
-                            elif isinstance(content, list):
-                                first_prompt = " ".join([b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"])
-                except Exception: pass
-    except Exception: pass
 
     proj_disp = (proj[:10] + "..") if len(proj) > 12 else (proj if proj else "-")
     tag_disp = (tag[:18] + "..") if len(tag) > 20 else (tag if tag else "-")
@@ -433,81 +557,124 @@ resume_session_from_path() {
 
   local resolved_dest
   resolved_dest=$(python3 -c "
-import sys, json, os, datetime
+import sys, json, os, datetime, tarfile, tempfile, shutil
 
 source = sys.argv[1]
 proj_dir = sys.argv[2]
 target_cwd = sys.argv[3]
 
-with open(source, 'r', encoding='utf-8') as fin:
-    raw_content = fin.read().replace('\r\n', '\n')
-
-lines = raw_content.split('\n')
-if not lines or not lines[0].strip():
-    sys.exit('File di sessione vuoto o non valido')
-
-try:
-    header = json.loads(lines[0])
-except Exception as e:
-    sys.exit(f'Header non valido: {e}')
-
-old_cwd = header.get('cwd', '')
-header['cwd'] = target_cwd
-
-rest = '\n'.join(lines[1:])
-if old_cwd and old_cwd != target_cwd:
-    rest = rest.replace(old_cwd, target_cwd)
-
-new_content = json.dumps(header) + '\n' + rest
-
-target_id = header.get('id', '')
-dest_name = os.path.basename(source)
-
-# 1. Match existing local file by session id
-matched = False
-if target_id and os.path.isdir(proj_dir):
-    for f in os.listdir(proj_dir):
-        if not f.endswith('.jsonl'):
-            continue
-        fp = os.path.join(proj_dir, f)
-        try:
-            with open(fp, 'r', encoding='utf-8') as check_f:
-                l1 = check_f.readline()
-                if l1 and json.loads(l1.strip()).get('id') == target_id:
-                    dest_name = f
-                    matched = True
+if source.endswith('.pi-session.tar.gz') or tarfile.is_tarfile(source):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with tarfile.open(source, 'r:gz') as tar:
+            tar.extractall(tmp_dir)
+        session_file = os.path.join(tmp_dir, 'session.jsonl')
+        if not os.path.isfile(session_file):
+            for f in os.listdir(tmp_dir):
+                if f.endswith('.jsonl'):
+                    session_file = os.path.join(tmp_dir, f)
                     break
-        except Exception:
-            pass
+        if not os.path.isfile(session_file):
+            sys.exit('Session file session.jsonl not found in archive')
 
-# 2. Match companion metadata sourceFile if not already matched
-if not matched:
-    meta_path = os.path.splitext(source)[0] + '.meta.json'
-    if os.path.isfile(meta_path):
+        with open(session_file, 'r', encoding='utf-8') as fin:
+            raw_content = fin.read().replace('\r\n', '\n')
+
+        lines = raw_content.split('\n')
+        if not lines or not lines[0].strip():
+            sys.exit('File di sessione vuoto o non valido')
+
         try:
-            with open(meta_path, 'r', encoding='utf-8') as mf:
-                mdata = json.load(mf)
-                if mdata.get('sourceFile'):
-                    dest_name = mdata['sourceFile']
-        except Exception:
-            pass
+            header = json.loads(lines[0])
+        except Exception as e:
+            sys.exit(f'Header non valido: {e}')
 
-dest_file = os.path.join(proj_dir, dest_name)
-if os.path.exists(dest_file):
+        old_cwd = header.get('cwd', '')
+        header['cwd'] = target_cwd
+
+        rest = '\n'.join(lines[1:])
+        if old_cwd and old_cwd != target_cwd:
+            rest = rest.replace(old_cwd, target_cwd)
+
+        new_content = json.dumps(header) + '\n' + rest
+        target_id = header.get('id', '')
+        base_name = os.path.basename(source)
+        if base_name.endswith('.pi-session.tar.gz'):
+            base_name = base_name[:-len('.pi-session.tar.gz')]
+
+        dest_name = f'{base_name}.jsonl'
+        matched = False
+        if target_id and os.path.isdir(proj_dir):
+            for f in os.listdir(proj_dir):
+                if not f.endswith('.jsonl'): continue
+                fp = os.path.join(proj_dir, f)
+                try:
+                    with open(fp, 'r', encoding='utf-8') as check_f:
+                        l1 = check_f.readline()
+                        if l1 and json.loads(l1.strip()).get('id') == target_id:
+                            dest_name = f
+                            matched = True
+                            break
+                except Exception: pass
+
+        if not matched:
+            meta_path = os.path.join(os.path.dirname(source), f'{base_name}.meta.json')
+            if os.path.isfile(meta_path):
+                try:
+                    with open(meta_path, 'r', encoding='utf-8') as mf:
+                        mdata = json.load(mf)
+                        if mdata.get('sourceFile'):
+                            dest_name = mdata['sourceFile']
+                except Exception: pass
+
+        dest_file = os.path.join(proj_dir, dest_name)
+        if os.path.exists(dest_file):
+            try:
+                with open(dest_file, 'r', encoding='utf-8') as check_f:
+                    l1 = check_f.readline()
+                    existing_id = json.loads(l1.strip()).get('id') if l1 else None
+                    if existing_id and target_id and existing_id != target_id:
+                        ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')
+                        dest_file = os.path.join(proj_dir, f'{ts}_{dest_name}')
+            except Exception: pass
+
+        with open(dest_file, 'w', encoding='utf-8') as fout:
+            fout.write(new_content)
+
+        # Restore SoL-Pi auxiliary files if present
+        sol_pi_tmp = os.path.join(tmp_dir, 'sol-pi')
+        if os.path.isdir(sol_pi_tmp):
+            for entry in os.listdir(sol_pi_tmp):
+                src_folder = os.path.join(sol_pi_tmp, entry)
+                dst_id = target_id if target_id else entry
+                dst_folder = os.path.join(proj_dir, 'sol-pi', dst_id)
+                os.makedirs(os.path.dirname(dst_folder), exist_ok=True)
+                if os.path.exists(dst_folder):
+                    shutil.rmtree(dst_folder)
+                shutil.copytree(src_folder, dst_folder)
+
+        print(dest_file)
+else:
+    with open(source, 'r', encoding='utf-8') as fin:
+        raw_content = fin.read().replace('\r\n', '\n')
+    lines = raw_content.split('\n')
+    if not lines or not lines[0].strip():
+        sys.exit('File di sessione vuoto o non valido')
     try:
-        with open(dest_file, 'r', encoding='utf-8') as check_f:
-            l1 = check_f.readline()
-            existing_id = json.loads(l1.strip()).get('id') if l1 else None
-            if existing_id and target_id and existing_id != target_id:
-                ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')
-                dest_file = os.path.join(proj_dir, f'{ts}_{dest_name}')
-    except Exception:
-        pass
-
-with open(dest_file, 'w', encoding='utf-8') as fout:
-    fout.write(new_content)
-
-print(dest_file)
+        header = json.loads(lines[0])
+    except Exception as e:
+        sys.exit(f'Header non valido: {e}')
+    old_cwd = header.get('cwd', '')
+    header['cwd'] = target_cwd
+    rest = '\n'.join(lines[1:])
+    if old_cwd and old_cwd != target_cwd:
+        rest = rest.replace(old_cwd, target_cwd)
+    new_content = json.dumps(header) + '\n' + rest
+    target_id = header.get('id', '')
+    dest_name = os.path.basename(source)
+    dest_file = os.path.join(proj_dir, dest_name)
+    with open(dest_file, 'w', encoding='utf-8') as fout:
+        fout.write(new_content)
+    print(dest_file)
 " "$selected" "$proj_dir" "$PWD")
 
   if [[ -n "$out_file" ]]; then
@@ -560,7 +727,7 @@ if os.path.isdir(d):
   if [[ -n "$tag" ]]; then
     chosen_file="${all_sessions[0]}"
   else
-    if command -v fzf >/dev/null 2>&1; then
+    if has_interactive_fzf; then
       local this_script
       this_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
       chosen_file=$(
@@ -608,7 +775,7 @@ if os.path.isdir(d):
 
   local clean_tag
   clean_tag="$(sanitize "$tag")"
-  local target_name="${proj_name}--${clean_tag}.jsonl"
+  local target_name="${proj_name}--${clean_tag}.pi-session.tar.gz"
   local target_path="${SAVE_DIR}/${target_name}"
 
   if [[ -f "$target_path" && $force -eq 0 ]]; then
@@ -619,26 +786,80 @@ if os.path.isdir(d):
     fi
   fi
 
-  cp "$chosen_file" "$target_path"
-
   local meta_file="${SAVE_DIR}/${proj_name}--${clean_tag}.meta.json"
   python3 -c "
-import sys, json, os, datetime
-proj_name, cwd, tag, src_file, out_file = sys.argv[1:6]
+import sys, json, os, datetime, tarfile
+
+proj_name, cwd, tag, src_file, out_tar, out_meta, proj_session_dir = sys.argv[1:8]
+
+first_p = ''
+first_r = ''
+last_p = ''
+last_r = ''
+count = 0
+target_id = ''
+
+try:
+    with open(src_file, 'r', encoding='utf-8') as f:
+        for idx, line in enumerate(f):
+            line_s = line.strip()
+            if not line_s: continue
+            try:
+                e = json.loads(line_s)
+                if idx == 0 and e.get('id'):
+                    target_id = e['id']
+                if e.get('type') == 'message':
+                    count += 1
+                    m = e.get('message', {})
+                    r = m.get('role')
+                    c = m.get('content', '')
+                    t = ''
+                    if isinstance(c, str): t = c
+                    elif isinstance(c, list):
+                        t = ' '.join([b.get('text', '') for b in c if isinstance(b, dict) and b.get('type') == 'text'])
+                    t = t.replace('\r', ' ').replace('\n', ' ').strip()
+                    if r == 'user':
+                        if not first_p: first_p = t
+                        last_p = t
+                    elif r == 'assistant':
+                        if not first_r: first_r = t
+                        last_r = t
+            except Exception: pass
+except Exception as err:
+    sys.exit(f'Error reading session: {err}')
+
+sol_pi_src = os.path.join(proj_session_dir, 'sol-pi', target_id) if target_id else ''
+has_sol_pi = bool(sol_pi_src and os.path.isdir(sol_pi_src) and os.listdir(sol_pi_src))
+
+with tarfile.open(out_tar, 'w:gz') as tar:
+    tar.add(src_file, arcname='session.jsonl')
+    if has_sol_pi:
+        tar.add(sol_pi_src, arcname=f'sol-pi/{target_id}')
+
 meta = {
+    'id': target_id,
     'projectName': proj_name,
     'projectCwd': cwd,
+    'name': tag,
     'tag': tag,
     'savedAt': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
     'sourceFile': os.path.basename(src_file),
     'hostname': os.uname().nodename,
-    'os': os.uname().sysname
+    'os': os.uname().sysname,
+    'hasSolPi': has_sol_pi,
+    'dialogue': {
+        'firstPrompt': first_p,
+        'firstReply': first_r,
+        'lastPrompt': last_p,
+        'lastReply': last_r,
+        'msgCount': count
+    }
 }
-with open(out_file, 'w', encoding='utf-8') as f:
+with open(out_meta, 'w', encoding='utf-8') as f:
     json.dump(meta, f, indent=2)
-" "$proj_name" "$PWD" "$clean_tag" "$chosen_file" "$meta_file"
+" "$proj_name" "$PWD" "$clean_tag" "$chosen_file" "$target_path" "$meta_file" "$proj_dir"
 
-  echo "✅ Session saved to storage:"
+  echo "✅ Session container saved to storage:"
   echo "   📁 Destination: $target_path"
   git_sync_push "$SAVE_DIR" "session: $target_name" "$target_path" "$meta_file"
 }
@@ -659,6 +880,8 @@ cmd_session_pull() {
     exit 1
   fi
 
+  auto_migrate_cloud_sessions "$LOAD_DIR"
+
   local files=()
   while IFS= read -r line; do
     [[ -n "$line" ]] && files+=("$line")
@@ -666,7 +889,7 @@ cmd_session_pull() {
 import os, sys
 d = sys.argv[1]
 if os.path.isdir(d):
-    fl = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.jsonl')]
+    fl = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.pi-session.tar.gz')]
     fl.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     for p in fl: print(p)
 " "$LOAD_DIR" 2>/dev/null || true)
@@ -677,7 +900,7 @@ if os.path.isdir(d):
   fi
 
   local selected=""
-  if command -v fzf >/dev/null 2>&1; then
+  if has_interactive_fzf; then
     local this_script
     this_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
     selected=$(
@@ -730,14 +953,16 @@ cmd_session_list() {
     exit 0
   fi
 
+  auto_migrate_cloud_sessions "$LOAD_DIR"
+
   local count
-  count=$(find "$LOAD_DIR" -maxdepth 1 -name "*.jsonl" 2>/dev/null | wc -l | tr -d ' ')
+  count=$(find "$LOAD_DIR" -maxdepth 1 -name "*.pi-session.tar.gz" 2>/dev/null | wc -l | tr -d ' ')
   if [[ "$count" -eq 0 ]]; then
     echo "ℹ️  No sessions found in $LOAD_DIR"
     exit 0
   fi
 
-  if [[ $table_mode -eq 1 ]] || { [[ -z "$out_file" ]] && ! command -v fzf >/dev/null 2>&1; }; then
+  if [[ $table_mode -eq 1 ]] || { [[ -z "$out_file" ]] && ! has_interactive_fzf; }; then
     print_table_sessions "$LOAD_DIR"
     return
   fi
@@ -771,7 +996,8 @@ cmd_session_list() {
       [Dd]*)
         read -e -rp "Delete $(basename "$selected") from cloud? [y/N]: " confirm || confirm="n"
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
-          local meta_file="${selected%.jsonl}.meta.json"
+          local base_archive="${selected%.pi-session.tar.gz}"
+          local meta_file="${base_archive}.meta.json"
           rm -f "$selected" "$meta_file"
           git_sync_push "$LOAD_DIR" "session: delete $(basename "$selected")" "$selected" "$meta_file"
           echo "🗑️  Deleted: $(basename "$selected")"
@@ -793,15 +1019,17 @@ cmd_session_delete() {
     exit 1
   fi
 
+  auto_migrate_cloud_sessions "$LOAD_DIR"
+
   local count
-  count=$(find "$LOAD_DIR" -maxdepth 1 -name "*.jsonl" 2>/dev/null | wc -l | tr -d ' ')
+  count=$(find "$LOAD_DIR" -maxdepth 1 -name "*.pi-session.tar.gz" 2>/dev/null | wc -l | tr -d ' ')
   if [[ "$count" -eq 0 ]]; then
     echo "ℹ️  No sessions found in $LOAD_DIR"
     exit 0
   fi
 
   local selected=""
-  if command -v fzf >/dev/null 2>&1; then
+  if has_interactive_fzf; then
     local this_script
     this_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
     selected=$(
@@ -822,7 +1050,7 @@ cmd_session_delete() {
 import os, sys
 d = sys.argv[1]
 if os.path.isdir(d):
-    fl = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.jsonl')]
+    fl = [os.path.join(d, f) for f in os.listdir(d) if f.endswith('.pi-session.tar.gz')]
     fl.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     for p in fl: print(p)
 " "$LOAD_DIR" 2>/dev/null || true)
@@ -844,7 +1072,8 @@ if os.path.isdir(d):
 
   read -e -rp "Delete $(basename "$selected") from cloud? [y/N]: " confirm || confirm="n"
   if [[ "$confirm" =~ ^[Yy]$ ]]; then
-    local meta_file="${selected%.jsonl}.meta.json"
+    local base_archive="${selected%.pi-session.tar.gz}"
+    local meta_file="${base_archive}.meta.json"
     rm -f "$selected" "$meta_file"
     git_sync_push "$LOAD_DIR" "session: delete $(basename "$selected")" "$selected" "$meta_file"
     echo "🗑️  Deleted: $(basename "$selected")"
@@ -856,7 +1085,7 @@ if os.path.isdir(d):
 cmd_config_push() {
   git_sync_pull "$CONFIG_DIR"
   mkdir -p "$CONFIG_DIR"
-  echo "📦 Backing up configuration to $CONFIG_DIR (Strategia 4: physical paths + symlinks)..."
+  echo "📦 Backing up configuration to $CONFIG_DIR (physical paths + symlinks)..."
   echo "   🔒 Excluding auth.json (API keys) and npm/ (binaries)"
 
   python3 -c "
@@ -870,7 +1099,7 @@ os.makedirs(config_dir, exist_ok=True)
 ignore_patterns = shutil.ignore_patterns('.git', 'node_modules', '*.bak', '*.preimport.bak')
 
 # 1. Root configuration files
-root_config_files = ['settings.json', 'AGENTS.md', 'APPEND_SYSTEM.md', 'SYSTEM.md', 'models.json', 'keybindings.json']
+root_config_files = ['settings.json', 'sol-pi.json', 'AGENTS.md', 'APPEND_SYSTEM.md', 'SYSTEM.md', 'models.json', 'keybindings.json']
 for fname in root_config_files:
     src = os.path.join(agent_dir, fname)
     if os.path.isfile(src):
@@ -957,7 +1186,7 @@ cmd_config_pull() {
     exit 1
   fi
 
-  echo "📥 Restoring configuration from $CONFIG_DIR (Strategia 4)..."
+  echo "📥 Restoring configuration from $CONFIG_DIR..."
 
   python3 -c "
 import os, sys, shutil, json
@@ -968,7 +1197,7 @@ home = os.path.expanduser('~')
 ignore_patterns = shutil.ignore_patterns('.git', 'node_modules', '*.bak', '*.preimport.bak')
 
 # 1. Root configuration files with backup
-root_config_files = ['settings.json', 'AGENTS.md', 'APPEND_SYSTEM.md', 'SYSTEM.md', 'models.json', 'keybindings.json']
+root_config_files = ['settings.json', 'sol-pi.json', 'AGENTS.md', 'APPEND_SYSTEM.md', 'SYSTEM.md', 'models.json', 'keybindings.json']
 for fname in root_config_files:
     src = os.path.join(config_dir, fname)
     dst = os.path.join(agent_dir, fname)

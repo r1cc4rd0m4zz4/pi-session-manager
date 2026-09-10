@@ -10,7 +10,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -27,6 +27,8 @@ interface SessionMeta {
 	savedAt: string;
 	sourceFile: string;
 	platform: string;
+	dialogue?: SessionDialoguePreview;
+	hasSolPi?: boolean;
 }
 
 interface SessionDialoguePreview {
@@ -39,6 +41,7 @@ interface SessionDialoguePreview {
 
 interface CloudSessionItem {
 	file: string;
+	baseName: string;
 	fullPath: string;
 	mtime: Date;
 	size: number;
@@ -359,14 +362,76 @@ function formatSessionPreview(
 	return lines.join("\n");
 }
 
-// ── Cloud Session Listing ───────────────────────────────────
+// ── Cloud Session Listing & Migration ───────────────────────
+
+function migrateLegacySessions(loadDir: string): void {
+	if (!fs.existsSync(loadDir)) return;
+	const files = fs.readdirSync(loadDir);
+	const jsonlFiles = files.filter(
+		(f: string) => f.endsWith(".jsonl") && !f.endsWith(".meta.json"),
+	);
+	if (jsonlFiles.length === 0) return;
+
+	for (const jsonl of jsonlFiles) {
+		const baseName = jsonl.slice(0, -".jsonl".length);
+		const targetArchive = path.join(loadDir, `${baseName}.pi-session.tar.gz`);
+		const jsonlPath = path.join(loadDir, jsonl);
+		const metaPath = path.join(loadDir, `${baseName}.meta.json`);
+
+		if (fs.existsSync(targetArchive)) {
+			try {
+				fs.unlinkSync(jsonlPath);
+			} catch {
+				/* ignore */
+			}
+		} else {
+			try {
+				const dialogue = parseCloudPreview(jsonlPath);
+				let meta: Partial<SessionMeta> = {};
+				if (fs.existsSync(metaPath)) {
+					try {
+						meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+					} catch {
+						/* ignore */
+					}
+				}
+				meta.dialogue = dialogue;
+				meta.hasSolPi = false;
+				fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+
+				const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sm-mig-"));
+				try {
+					fs.copyFileSync(jsonlPath, path.join(tmpDir, "session.jsonl"));
+					execFileSync("tar", [
+						"-czf",
+						targetArchive,
+						"-C",
+						tmpDir,
+						"session.jsonl",
+					]);
+					try {
+						fs.unlinkSync(jsonlPath);
+					} catch {
+						/* ignore */
+					}
+				} finally {
+					fs.rmSync(tmpDir, { recursive: true, force: true });
+				}
+			} catch {
+				/* skip failed migration item */
+			}
+		}
+	}
+}
 
 function listCloudSessions(loadDir: string): CloudSessionItem[] {
 	if (!fs.existsSync(loadDir)) return [];
+	migrateLegacySessions(loadDir);
+
 	return fs
 		.readdirSync(loadDir)
 		.flatMap((f: string) => {
-			if (!f.endsWith(".jsonl")) return [];
+			if (!f.endsWith(".pi-session.tar.gz")) return [];
 			const fullPath = path.join(loadDir, f);
 			let stat: fs.Stats;
 			try {
@@ -374,7 +439,8 @@ function listCloudSessions(loadDir: string): CloudSessionItem[] {
 			} catch {
 				return [];
 			}
-			const metaPath = path.join(loadDir, f.replace(/\.jsonl$/, ".meta.json"));
+			const baseName = f.slice(0, -".pi-session.tar.gz".length);
+			const metaPath = path.join(loadDir, `${baseName}.meta.json`);
 			let meta: Partial<SessionMeta> = {};
 			if (fs.existsSync(metaPath)) {
 				try {
@@ -385,10 +451,17 @@ function listCloudSessions(loadDir: string): CloudSessionItem[] {
 					/* ignore */
 				}
 			}
-			const dialogue = parseCloudPreview(fullPath);
+			const dialogue: SessionDialoguePreview = meta.dialogue ?? {
+				firstPrompt: "",
+				firstReply: "",
+				lastPrompt: "",
+				lastReply: "",
+				msgCount: 0,
+			};
 			return [
 				{
 					file: f,
+					baseName,
 					fullPath,
 					mtime: stat.mtime,
 					size: stat.size,
@@ -407,9 +480,9 @@ function cloudSessionLabel(item: CloudSessionItem, idx: number): string {
 	let proj = item.meta.projectName;
 	let tag = item.meta.name;
 	if (!proj || !tag) {
-		const parts = item.file.replace(/\.jsonl$/, "").split("--");
+		const parts = item.baseName.split("--");
 		if (!proj && parts.length > 1) proj = parts[0];
-		if (!tag) tag = parts.length > 1 ? parts[1] : item.file.slice(0, 16);
+		if (!tag) tag = parts.length > 1 ? parts[1] : item.baseName.slice(0, 16);
 	}
 
 	const projPrefix = proj ? `[${proj.slice(0, 10)}] ` : "";
@@ -419,77 +492,119 @@ function cloudSessionLabel(item: CloudSessionItem, idx: number): string {
 		: "";
 	const badge =
 		item.dialogue.msgCount > 0 ? ` (${item.dialogue.msgCount}m)` : "";
+	const solPiBadge = item.meta.hasSolPi ? " ⚡" : "";
 	const dateStr = formatShortDate(item.mtime);
 
-	return `${idx + 1}. ${projPrefix}${tagText}${snippet}${badge} · ${dateStr}`;
+	return `${idx + 1}. ${projPrefix}${tagText}${snippet}${badge}${solPiBadge} · ${dateStr}`;
 }
 
 // ── Re-home Logic ───────────────────────────────────────────
 
-function rehomeSession(sourcePath: string, targetCwd: string): string {
+function rehomeSession(sourceArchivePath: string, targetCwd: string): string {
 	const sessionDirName = getSanitizedProjectDir(targetCwd);
 	const targetDir = path.join(getAgentDir(), "sessions", sessionDirName);
 	fs.mkdirSync(targetDir, { recursive: true });
 
-	const rawContent = fs.readFileSync(sourcePath, "utf8").replace(/\r\n/g, "\n");
-	const lines = rawContent.split("\n");
-	if (lines.length === 0 || !lines[0].trim()) {
-		throw new Error("File di sessione vuoto o non valido");
-	}
-
-	let header: Record<string, unknown>;
+	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sm-rehome-"));
 	try {
-		header = JSON.parse(lines[0]) as Record<string, unknown>;
-	} catch (e) {
-		throw new Error(
-			`Header non valido: ${e instanceof Error ? e.message : String(e)}`,
-		);
-	}
+		execFileSync("tar", ["-xzf", sourceArchivePath, "-C", tmpDir]);
 
-	const oldCwd = typeof header.cwd === "string" ? header.cwd : "";
-	header.cwd = targetCwd;
+		let sessionJsonl = path.join(tmpDir, "session.jsonl");
+		if (!fs.existsSync(sessionJsonl)) {
+			const fallback = fs
+				.readdirSync(tmpDir)
+				.find((f: string) => f.endsWith(".jsonl"));
+			if (fallback) sessionJsonl = path.join(tmpDir, fallback);
+			else throw new Error("Archivio non valido: session.jsonl non trovato");
+		}
 
-	// Single-pass replacement on lines 1..end only
-	let rest = lines.slice(1).join("\n");
-	if (oldCwd && oldCwd !== targetCwd) {
-		rest = rest.replaceAll(oldCwd, targetCwd);
-	}
-	const newContent = JSON.stringify(header) + "\n" + rest;
+		const rawContent = fs
+			.readFileSync(sessionJsonl, "utf8")
+			.replace(/\r\n/g, "\n");
+		const lines = rawContent.split("\n");
+		if (lines.length === 0 || !lines[0].trim()) {
+			throw new Error("File di sessione vuoto o non valido");
+		}
 
-	const targetId = typeof header.id === "string" ? header.id : "";
-	const destFilename = (() => {
-		if (targetId && fs.existsSync(targetDir)) {
-			for (const f of fs.readdirSync(targetDir)) {
-				if (!f.endsWith(".jsonl")) continue;
-				const existingId = readHeaderId(path.join(targetDir, f));
-				if (existingId === targetId) return f;
+		let header: Record<string, unknown>;
+		try {
+			header = JSON.parse(lines[0]) as Record<string, unknown>;
+		} catch (e) {
+			throw new Error(
+				`Header non valido: ${e instanceof Error ? e.message : String(e)}`,
+			);
+		}
+
+		const oldCwd = typeof header.cwd === "string" ? header.cwd : "";
+		header.cwd = targetCwd;
+
+		// Single-pass replacement on lines 1..end only
+		let rest = lines.slice(1).join("\n");
+		if (oldCwd && oldCwd !== targetCwd) {
+			rest = rest.replaceAll(oldCwd, targetCwd);
+		}
+		const newContent = JSON.stringify(header) + "\n" + rest;
+
+		const targetId = typeof header.id === "string" ? header.id : "";
+		const baseArchiveName = path
+			.basename(sourceArchivePath)
+			.replace(/\.pi-session\.tar\.gz$/, "");
+		const destFilename = (() => {
+			if (targetId && fs.existsSync(targetDir)) {
+				for (const f of fs.readdirSync(targetDir)) {
+					if (!f.endsWith(".jsonl")) continue;
+					const existingId = readHeaderId(path.join(targetDir, f));
+					if (existingId === targetId) return f;
+				}
+			}
+			const metaPath = path.join(
+				path.dirname(sourceArchivePath),
+				`${baseArchiveName}.meta.json`,
+			);
+			if (fs.existsSync(metaPath)) {
+				try {
+					const meta = JSON.parse(
+						fs.readFileSync(metaPath, "utf8"),
+					) as Partial<SessionMeta>;
+					if (meta.sourceFile) return meta.sourceFile;
+				} catch {
+					/* ignore */
+				}
+			}
+			return `${baseArchiveName}.jsonl`;
+		})();
+
+		let destFile = path.join(targetDir, destFilename);
+		if (fs.existsSync(destFile)) {
+			const existingId = readHeaderId(destFile);
+			if (existingId && targetId && existingId !== targetId) {
+				const ts = new Date().toISOString().replace(/[:.]/g, "-");
+				destFile = path.join(targetDir, `${ts}_${destFilename}`);
 			}
 		}
-		const metaPath = sourcePath.replace(/\.jsonl$/, ".meta.json");
-		if (fs.existsSync(metaPath)) {
-			try {
-				const meta = JSON.parse(
-					fs.readFileSync(metaPath, "utf8"),
-				) as Partial<SessionMeta>;
-				if (meta.sourceFile) return meta.sourceFile;
-			} catch {
-				/* ignore */
+
+		fs.writeFileSync(destFile, newContent, "utf8");
+
+		// Handle SoL-Pi auxiliary folder restoration if present
+		const extractedSolPi = path.join(tmpDir, "sol-pi");
+		if (fs.existsSync(extractedSolPi)) {
+			const entries = fs.readdirSync(extractedSolPi);
+			for (const entry of entries) {
+				const srcFolder = path.join(extractedSolPi, entry);
+				const dstFolder = path.join(targetDir, "sol-pi", targetId || entry);
+				fs.mkdirSync(path.dirname(dstFolder), { recursive: true });
+				// Clean target directory completely before copy to prevent stale/orphaned chunks
+				if (fs.existsSync(dstFolder)) {
+					fs.rmSync(dstFolder, { recursive: true, force: true });
+				}
+				cleanCopy(srcFolder, dstFolder, { recursive: true });
 			}
 		}
-		return path.basename(sourcePath);
-	})();
 
-	let destFile = path.join(targetDir, destFilename);
-	if (fs.existsSync(destFile)) {
-		const existingId = readHeaderId(destFile);
-		if (existingId && targetId && existingId !== targetId) {
-			const ts = new Date().toISOString().replace(/[:.]/g, "-");
-			destFile = path.join(targetDir, `${ts}_${destFilename}`);
-		}
+		return destFile;
+	} finally {
+		fs.rmSync(tmpDir, { recursive: true, force: true });
 	}
-
-	fs.writeFileSync(destFile, newContent, "utf8");
-	return destFile;
 }
 
 // ── Clean Copy Helper ───────────────────────────────────────
@@ -538,11 +653,14 @@ export default function (pi: ExtensionAPI): void {
 		fs.mkdirSync(saveDir, { recursive: true });
 		gitPullAsync(saveDir);
 
+		const sessionId = ctx.sessionManager.getSessionId();
 		const projectName = path.basename(ctx.cwd);
 		const tag = args.trim() || formatDate(new Date());
 		const cleanTag = sanitizeName(tag);
-		const targetFilename = `${projectName}--${cleanTag}.jsonl`;
+		const targetFilename = `${projectName}--${cleanTag}.pi-session.tar.gz`;
 		const targetPath = path.join(saveDir, targetFilename);
+		const metaFilename = `${projectName}--${cleanTag}.meta.json`;
+		const metaPath = path.join(saveDir, metaFilename);
 
 		const dialogue = parseCloudPreview(activeFile);
 		const skipConfirm = args.includes("--yes") || args.includes("-y");
@@ -574,22 +692,48 @@ export default function (pi: ExtensionAPI): void {
 			}
 		}
 
-		fs.copyFileSync(activeFile, targetPath);
+		// Check if SoL-Pi has auxiliary session data
+		const solPiDir = path.join(path.dirname(activeFile), "sol-pi", sessionId);
+		const hasSolPi =
+			fs.existsSync(solPiDir) && fs.readdirSync(solPiDir).length > 0;
+
+		// Package session.jsonl + optional sol-pi in a temporary directory
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sm-push-"));
+		try {
+			fs.copyFileSync(activeFile, path.join(tmpDir, "session.jsonl"));
+			const tarArgs = ["-czf", targetPath, "-C", tmpDir, "session.jsonl"];
+			if (hasSolPi) {
+				const tmpSolPiParent = path.join(tmpDir, "sol-pi");
+				fs.mkdirSync(tmpSolPiParent, { recursive: true });
+				cleanCopy(solPiDir, path.join(tmpSolPiParent, sessionId), {
+					recursive: true,
+				});
+				tarArgs.push("sol-pi");
+			}
+			execFileSync("tar", tarArgs);
+		} finally {
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		}
 
 		const meta: SessionMeta = {
-			id: ctx.sessionManager.getSessionId(),
+			id: sessionId,
 			name: cleanTag,
 			projectName,
 			projectCwd: ctx.cwd,
 			savedAt: new Date().toISOString(),
 			sourceFile: path.basename(activeFile),
 			platform: process.platform,
+			dialogue,
+			hasSolPi,
 		};
-		const metaPath = path.join(saveDir, `${projectName}--${cleanTag}.meta.json`);
 		fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
 
 		gitPushAsync(saveDir, `session: ${targetFilename}`, [targetPath, metaPath]);
-		ctx.ui.notify(`✅ Sessione salvata nel Cloud: "${cleanTag}"`, "info");
+		const solPiMsg = hasSolPi ? " (con asset SoL-Pi)" : "";
+		ctx.ui.notify(
+			`✅ Sessione salvata nel Cloud: "${cleanTag}"${solPiMsg}`,
+			"info",
+		);
 	};
 
 	pi.registerCommand("session-push", {
@@ -711,7 +855,7 @@ export default function (pi: ExtensionAPI): void {
 			try {
 				const dest = rehomeSession(selected.fullPath, ctx.cwd);
 				await ctx.switchSession(dest, {
-					withSession: async (newCtx) => {
+					withSession: async (newCtx: ExtensionCommandContext) => {
 						newCtx.ui.notify(`✅ Sessione ripresa: ${path.basename(dest)}`, "info");
 					},
 				});
@@ -800,7 +944,7 @@ export default function (pi: ExtensionAPI): void {
 		if (!ok) return;
 
 		try {
-			const metaPath = selected.fullPath.replace(/\.jsonl$/, ".meta.json");
+			const metaPath = path.join(loadDir, `${selected.baseName}.meta.json`);
 			if (fs.existsSync(selected.fullPath)) fs.unlinkSync(selected.fullPath);
 			if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
 			gitPushAsync(loadDir, `session: delete ${selected.file}`, [
@@ -839,6 +983,7 @@ export default function (pi: ExtensionAPI): void {
 		// 1. Root configuration files
 		const rootConfigFiles = [
 			"settings.json",
+			"sol-pi.json",
 			"AGENTS.md",
 			"APPEND_SYSTEM.md",
 			"SYSTEM.md",
@@ -943,7 +1088,7 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	pi.registerCommand("config-push", {
-		description: "Salva settings, prompts e skills su Cloud (Strategia 4)",
+		description: "Salva settings, prompts e skills su Cloud",
 		handler: handleConfigPush,
 	});
 
@@ -972,6 +1117,7 @@ export default function (pi: ExtensionAPI): void {
 		// 1. Root configuration files with backup
 		const rootConfigFiles = [
 			"settings.json",
+			"sol-pi.json",
 			"AGENTS.md",
 			"APPEND_SYSTEM.md",
 			"SYSTEM.md",

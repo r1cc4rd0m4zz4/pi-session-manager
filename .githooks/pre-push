@@ -18,13 +18,15 @@ else
 fi
 
 # 2. Hardcoded Personal User Paths & PII
+USER_NAME="${USER:-$(id -un 2>/dev/null || whoami 2>/dev/null || echo '')}"
 FORBIDDEN_PATTERNS=(
-  "/Users/mazric"
-  "/home/mazric"
   "ghp_"
   "xoxb-"
   "AKIA[0-9A-Z]{16}"
 )
+if [[ -n "$USER_NAME" ]]; then
+  FORBIDDEN_PATTERNS+=("/Users/$USER_NAME" "/home/$USER_NAME")
+fi
 
 ERRORS=0
 for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
