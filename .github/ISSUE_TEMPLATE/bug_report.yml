@@ -1,0 +1,49 @@
+name: Bug Report
+description: File a bug report for pi-session-manager
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please ensure you are running the latest version of `pi-session-manager` and `@earendil-works/pi-coding-agent`.
+  - type: input
+    id: environment
+    attributes:
+      label: Operating System & Environment
+      description: What OS, architecture, and storage backend are you using?
+      placeholder: "e.g., macOS Sequoia (arm64), Ubuntu 24.04 (x86_64), OneDrive / local mount"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: pi-sm version & Pi version
+      description: Output of `pi-sm version` and `pi --version`
+      placeholder: "e.g., pi-sm v0.1.0-beta.1, Pi 0.85.1"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Describe the steps required to reproduce the issue.
+      placeholder: |
+        1. Run `/session-push my-tag`
+        2. Pull on target machine via `pi-sm session-pull`
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Error Output
+      description: Copy and paste any relevant terminal output or error messages.
+      render: shell

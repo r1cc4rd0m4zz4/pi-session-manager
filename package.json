@@ -5,10 +5,16 @@
   "type": "module",
   "keywords": [
     "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "pi-agent",
     "session-manager",
-    "sync",
+    "context-management",
+    "sol-pi",
+    "cloud-sync",
     "onedrive",
-    "pi-coding-agent"
+    "cross-platform",
+    "fzf"
   ],
   "license": "MIT",
   "repository": {

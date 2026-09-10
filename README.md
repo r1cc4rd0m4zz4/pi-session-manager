@@ -1,8 +1,20 @@
-# pi-session-manager
+# ⚡ pi-session-manager
 
-Zero-bloat session & configuration sync manager for [Pi Coding Agent](https://pi.dev) across macOS and Linux machines.
+[![Pi Package](https://img.shields.io/badge/Pi--Package-Extension-76B900?logo=github&logoColor=white)](https://github.com/r1cc4rd0m4zz4/pi-session-manager)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-555555.svg)
+![Zero Dependencies](https://img.shields.io/badge/Dependencies-0%20(zero%20npm)-success.svg)
+[![Security Checks](https://github.com/r1cc4rd0m4zz4/pi-session-manager/actions/workflows/security.yml/badge.svg)](https://github.com/r1cc4rd0m4zz4/pi-session-manager/actions/workflows/security.yml)
+[![CodeQL](https://github.com/r1cc4rd0m4zz4/pi-session-manager/actions/workflows/codeql.yml/badge.svg)](https://github.com/r1cc4rd0m4zz4/pi-session-manager/actions/workflows/codeql.yml)
+[![SoL-Pi Compatible](https://img.shields.io/badge/SoL--Pi-Compatible-76B900.svg)](#-sol-pi-integration-nvlabssol-pi)
 
-Works seamlessly with **OneDrive**, local mounts, or any private Git repository.
+> **Zero-bloat session & configuration sync manager for [Pi Coding Agent](https://github.com/earendil-works/pi) across macOS and Linux machines.**  
+> Works seamlessly with **OneDrive**, local mounts, or any private Git repository.
+
+```bash
+# ⚡ 1-Line Quick Install inside Pi:
+pi install git:github.com/r1cc4rd0m4zz4/pi-session-manager
+```
 
 ---
 
