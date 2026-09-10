@@ -37,16 +37,17 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Verify TypeScript / Module Load
         run: |
-          node -e '
+          node --experimental-strip-types -e '
           (async () => {
             const mod = await import("./extensions/pi-session-manager.ts");
             if (typeof mod.default !== "function") {
               throw new Error("Extension default export is not a function");
             }
+            console.log("✓ Extension default export verified as function");
           })();
           '
 
