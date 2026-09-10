@@ -869,11 +869,12 @@ home = os.path.expanduser('~')
 os.makedirs(config_dir, exist_ok=True)
 ignore_patterns = shutil.ignore_patterns('.git', 'node_modules', '*.bak', '*.preimport.bak')
 
-# 1. settings.json
-s_src = os.path.join(agent_dir, 'settings.json')
-if os.path.isfile(s_src):
-    shutil.copy2(s_src, os.path.join(config_dir, 'settings.json'))
-    print('   ✓ settings.json')
+# 1. settings.json & AGENTS.md
+for fname in ['settings.json', 'AGENTS.md']:
+    s_src = os.path.join(agent_dir, fname)
+    if os.path.isfile(s_src):
+        shutil.copy2(s_src, os.path.join(config_dir, fname))
+        print(f'   ✓ {fname}')
 
 # 2. prompts/
 p_src = os.path.join(agent_dir, 'prompts')
@@ -964,15 +965,16 @@ config_dir = sys.argv[2]
 home = os.path.expanduser('~')
 ignore_patterns = shutil.ignore_patterns('.git', 'node_modules', '*.bak', '*.preimport.bak')
 
-# 1. settings.json with backup
-s_src = os.path.join(config_dir, 'settings.json')
-s_dst = os.path.join(agent_dir, 'settings.json')
-if os.path.isfile(s_src):
-    if os.path.isfile(s_dst):
-        shutil.copy2(s_dst, s_dst + '.preimport.bak')
-        print('   ✓ Backed up existing settings.json to settings.json.preimport.bak')
-    shutil.copy2(s_src, s_dst)
-    print('   ✓ Restored settings.json')
+# 1. settings.json & AGENTS.md with backup
+for fname in ['settings.json', 'AGENTS.md']:
+    s_src = os.path.join(config_dir, fname)
+    s_dst = os.path.join(agent_dir, fname)
+    if os.path.isfile(s_src):
+        if os.path.isfile(s_dst):
+            shutil.copy2(s_dst, s_dst + '.preimport.bak')
+            print(f'   ✓ Backed up existing {fname} to {fname}.preimport.bak')
+        shutil.copy2(s_src, s_dst)
+        print(f'   ✓ Restored {fname}')
 
 # 2. prompts/
 p_src = os.path.join(config_dir, 'prompts')

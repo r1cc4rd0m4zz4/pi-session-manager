@@ -838,12 +838,14 @@ export default function (pi: ExtensionAPI): void {
 		const manifest: ConfigManifestItem[] = [];
 		const touchedFiles: string[] = [];
 
-		// 1. settings.json
-		const settingsSrc = path.join(agentDir, "settings.json");
-		const settingsDst = path.join(configDir, "settings.json");
-		if (fs.existsSync(settingsSrc)) {
-			fs.copyFileSync(settingsSrc, settingsDst);
-			touchedFiles.push(settingsDst);
+		// 1. settings.json & AGENTS.md
+		for (const fname of ["settings.json", "AGENTS.md"]) {
+			const src = path.join(agentDir, fname);
+			const dst = path.join(configDir, fname);
+			if (fs.existsSync(src)) {
+				fs.copyFileSync(src, dst);
+				touchedFiles.push(dst);
+			}
 		}
 
 		// 2. prompts/
@@ -959,14 +961,16 @@ export default function (pi: ExtensionAPI): void {
 			if (!ok) return;
 		}
 
-		// 1. settings.json
-		const settingsSrc = path.join(configDir, "settings.json");
-		const settingsDst = path.join(agentDir, "settings.json");
-		if (fs.existsSync(settingsSrc)) {
-			if (fs.existsSync(settingsDst)) {
-				fs.copyFileSync(settingsDst, `${settingsDst}.preimport.bak`);
+		// 1. settings.json & AGENTS.md
+		for (const fname of ["settings.json", "AGENTS.md"]) {
+			const src = path.join(configDir, fname);
+			const dst = path.join(agentDir, fname);
+			if (fs.existsSync(src)) {
+				if (fs.existsSync(dst)) {
+					fs.copyFileSync(dst, `${dst}.preimport.bak`);
+				}
+				fs.copyFileSync(src, dst);
 			}
-			fs.copyFileSync(settingsSrc, settingsDst);
 		}
 
 		// 2. prompts/
