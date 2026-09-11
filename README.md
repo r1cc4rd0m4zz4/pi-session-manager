@@ -47,7 +47,7 @@ Clone the repository on your machine and run the built-in installer:
 
 ```bash
 git clone https://github.com/r1cc4rd0m4zz4/pi-session-manager.git ~/gitapp/pi-session-manager
-~/gitapp/pi-session-manager/bin/pi-sm install
+./bin/pi-sm install
 ```
 
 This automatically:
