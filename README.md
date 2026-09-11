@@ -46,8 +46,8 @@ When switching between macOS and Linux machines (e.g. MacBook on the go and Linu
 Clone the repository on your machine and run the built-in installer:
 
 ```bash
-git clone https://github.com/r1cc4rd0m4zz4/pi-session-manager.git ~/gitapp/pi-session-manager
-./bin/pi-sm install
+git clone https://github.com/r1cc4rd0m4zz4/pi-session-manager.git
+bash pi-session-manager/bin/pi-sm install
 ```
 
 This automatically:
